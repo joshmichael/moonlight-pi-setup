@@ -1,6 +1,6 @@
 # Moonlight Pi Setup
 
-A setup script that turns a **Raspberry Pi 5** into a dedicated [Moonlight](https://moonlight-stream.org) game-streaming box. After setup, the Pi boots straight into Moonlight on your TV, with hardware HEVC decoding, HDR and surround sound.
+A setup script that turns a **Raspberry Pi 5** into a [Moonlight](https://moonlight-stream.org) game-streaming box. After setup, the Pi can boot straight into Moonlight on your TV, with hardware HEVC decoding, HDR and surround sound. It works on both **Raspberry Pi OS Lite** and the full **desktop** version.
 
 Tested result on a Pi 5 (8 GB) over wired gigabit Ethernet: **2560×1440 at 60 fps, HEVC 10-bit HDR, 5.1 surround**, with ~3.5 ms decode time and no dropped frames.
 
@@ -9,9 +9,9 @@ Tested result on a Pi 5 (8 GB) over wired gigabit Ethernet: **2560×1440 at 60 f
 ## Requirements
 
 - **Raspberry Pi 5** (any RAM size)
-- **Raspberry Pi OS Lite (64-bit)**, based on Debian 13 "Trixie", freshly flashed with Raspberry Pi Imager. Enable SSH in Imager's settings so you can manage the Pi once it boots into Moonlight.
+- **Raspberry Pi OS (64-bit)**, based on Debian 13 "Trixie": either **Lite** (recommended for a dedicated box) or the full **desktop** version. Enable SSH in Raspberry Pi Imager's settings so you can manage the Pi once it boots into Moonlight.
 - **Wired Ethernet** (strongly recommended)
-- A TV or monitor on HDMI. Use **HDMI 0**, the port next to the USB-C power socket.
+- A TV or monitor on HDMI. Either port works, and you can swap ports later: sound follows whichever port has a screen connected.
 - A gaming PC running a streaming host: [Sunshine](https://github.com/LizardByte/Sunshine), [Apollo](https://github.com/ClassicOldSong/Apollo) or [Vibepollo](https://github.com/Nonary/Vibepollo)
 
 ## Installation
@@ -36,8 +36,9 @@ Have the TV (and receiver, if you use one) switched on while the script runs, so
 
 | Question | Default |
 |---|---|
-| Speaker setup: Stereo, 5.1 or 7.1 | Stereo |
-| Start Moonlight automatically when the Pi boots (recommended) | Yes |
+| **Lite:** Start Moonlight automatically when the Pi boots (recommended) | Yes |
+| **Desktop:** Boot straight into Moonlight instead of the desktop (recommended) | Yes |
+| Speaker setup: Stereo, 5.1 or 7.1 (not asked if you keep the desktop, see below) | Stereo |
 | Hide boot messages (recommended) | Yes |
 | Quit the running game on your PC when the Pi shuts down (recommended) | Yes |
 | Install Tailscale | No |
@@ -52,10 +53,10 @@ You'll see a summary before anything is changed. At the end, the script offers t
 | Installs `moonlight-qt` with `apt` (adds Moonlight's official package repository only if needed) | The official build, kept up to date by `apt upgrade` |
 | Adds your user to the `video`, `render`, `input` and `audio` groups | Access to the display, GPU, controllers and audio |
 | Writes `~/.config/moonlight-pi-setup/eglfs.json` | Points Moonlight at the Pi 5's display controller. Without it Moonlight fails with **"Cannot create window: no screens available"** |
-| Writes `~/.asoundrc` | Sends audio to the TV's HDMI port and fixes the surround channel order (see below) |
-| Sets `AUDIODEV=default` | Stops Moonlight wrongly reporting that surround sound isn't supported |
+| Writes `~/.asoundrc`, and checks which HDMI port has a screen connected each time Moonlight starts | Sends audio to the TV's HDMI port, even if you swap ports later, and fixes the surround channel order (see below) |
+| Sets `AUDIODEV=default` and `SDL_AUDIODRIVER=alsa` | Stops Moonlight wrongly reporting that surround sound isn't supported, and makes it use the settings above |
 | Writes `/etc/sysctl.d/90-moonlight-pi-setup.conf` (`net.core.rmem_max`) | Lets Moonlight use a larger network buffer, which helps at high bitrates |
-| Turns on console auto-login, and adds a launch loop to `~/.bash_profile` | Boots straight into Moonlight, and restarts it if it closes |
+| Switches the Pi to boot to the console with auto-login, and adds a launch loop to `~/.bash_profile` | Boots straight into Moonlight, and restarts it if it closes. How the Pi booted before (console or desktop) is remembered and restored on uninstall |
 | Optional: adds quiet-boot options to `/boot/firmware/cmdline.txt` and `config.txt` | Hides boot text and the splash screen |
 | Optional: installs `/usr/local/bin/moonlight-quit-all` and the `moonlight-quit-on-shutdown` service | Ends the game on your PC when the Pi is switched off (see below) |
 | Optional: installs Tailscale and/or VirtualHere | See below |
@@ -69,13 +70,24 @@ On Raspberry Pi OS Lite (plain ALSA, no PipeWire or PulseAudio), Moonlight has t
 1. **"Your selected surround sound setting is not supported"**: when asked for 5.1, the audio library Moonlight uses looks for an ALSA device called `surround51`, which the Pi's HDMI output doesn't provide.
 2. **Wrong speakers**: the Pi's HDMI output expects the six 5.1 channels in a different order (FL FR LFE FC RL RR) from the one Linux programs send (FL FR RL RR FC LFE). Without the fix, the centre, subwoofer and rear channels come out of the wrong speakers.
 
-The script fixes both. If PipeWire or PulseAudio is installed, it skips the audio changes, because those handle it themselves.
+The script fixes both. On the desktop version, the fix is used when Moonlight boots on its own. If you keep the desktop, the desktop's audio system (PipeWire) handles the speakers instead, and the script leaves audio alone.
 
 > **7.1 is experimental.** It's built using the same method as the tested 5.1 fix, but hasn't been confirmed on real 7.1 speakers. If any speaker plays the wrong channel, please [open an issue](https://github.com/joshmichael/moonlight-pi-setup/issues) with your TV/receiver model and the output of `speaker-test -c 8 -t wav -l 1`.
 
+## Using the desktop version
+
+On the full desktop version of Raspberry Pi OS, the script asks whether to **boot straight into Moonlight instead of the desktop**.
+
+**Yes (recommended).** The Pi boots to the console and starts Moonlight on its own, exactly like the Lite setup. This gives the lowest latency and is the only way to get **HDR**. The desktop stays installed:
+
+- To open it, quit Moonlight, press a key within 5 seconds, then type `sudo systemctl start display-manager`.
+- Uninstalling (or re-running the script and answering No) switches the Pi back to booting to the desktop, including desktop auto-login if you had it.
+
+**No.** The Pi keeps booting to the desktop, and you open Moonlight from the applications menu (under Games). Streaming works, but it runs through the desktop, so there's no HDR and slightly more latency. Audio is handled by the desktop: for surround sound, choose 5.1 or 7.1 for the HDMI output in the desktop's sound settings.
+
 ## After rebooting
 
-The Pi boots into Moonlight's host list. Pair it with your PC (enter the PIN shown in your host's web UI), then set:
+If you chose to boot straight into Moonlight, the Pi boots into Moonlight's host list. Pair it with your PC (enter the PIN shown in your host's web UI), then set:
 
 | Setting | Recommended |
 |---|---|
@@ -137,6 +149,8 @@ speaker-test -c 6 -t wav -l 1                 # 5.1 test: each speaker announces
 grep -i channels /tmp/moonlight.log | tail -3 # Should say 6 channels for 5.1
 ```
 
+Sound goes to whichever HDMI port has a screen connected when Moonlight starts (HDMI 0 if both do). After moving the cable to the other port, reboot, or quit Moonlight so it restarts. To check which port is being used, run `echo $MOONLIGHT_HDMI_CARD` over SSH: `vc4hdmi0` is HDMI 0, `vc4hdmi1` is HDMI 1.
+
 If the speaker test fails for 5.1, your TV may only accept stereo from the Pi. To pass surround sound through a TV to a receiver or soundbar, the TV needs **eARC** (not plain ARC). Otherwise, connect the Pi to the receiver directly.
 
 **Stutter or dropped frames**
@@ -158,11 +172,12 @@ Re-run the script. If it persists, check that `~/.config/moonlight-pi-setup/eglf
 ~/.local/share/moonlight-pi-setup/moonlight-pi-setup.sh --uninstall
 ```
 
-This removes the settings the script added, restores your original `~/.asoundrc` if you had one, turns auto-login back off, restores the boot options, and removes the quit-on-shutdown service. It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
+This removes the settings the script added, restores your original `~/.asoundrc` if you had one, puts back how the Pi originally booted (to the desktop, or to a console login on Lite), restores the boot options, and removes the quit-on-shutdown service. It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
 
 ## Known limitations
 
-- **Raspberry Pi 5 only**, on Raspberry Pi OS Lite (Trixie). Other setups may work with `--force` but aren't supported.
+- **Raspberry Pi 5 only**, on Raspberry Pi OS (Trixie), Lite or desktop. Other setups may work with `--force` but aren't supported.
+- **Desktop version support is new.** It has been tested in simulation but not yet on real hardware. Lite is the most tested setup. Please report any problems.
 - **PyroWave** (from Nonary's Moonlight fork) is not supported on the Pi 5. It can be patched to run, but decodes too slowly for 60 fps and is SDR-only.
 - **VRR** isn't available, because the Pi 5's HDMI output doesn't support it.
 - **7.1 audio** is experimental (see above).
