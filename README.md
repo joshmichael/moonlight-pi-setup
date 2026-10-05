@@ -1,1 +1,168 @@
-# moonlight-pi-setup
+# Moonlight Pi Setup
+
+A setup script that turns a **Raspberry Pi 5** into a dedicated [Moonlight](https://moonlight-stream.org) game-streaming box. After setup, the Pi boots straight into Moonlight on your TV, with hardware HEVC decoding, HDR and surround sound.
+
+Tested result on a Pi 5 (8 GB) over wired gigabit Ethernet: **2560×1440 at 60 fps, HEVC 10-bit HDR, 5.1 surround**, with ~3.5 ms decode time and no dropped frames.
+
+---
+
+## Requirements
+
+- **Raspberry Pi 5** (any RAM size)
+- **Raspberry Pi OS Lite (64-bit)**, based on Debian 13 "Trixie", freshly flashed with Raspberry Pi Imager. Enable SSH in Imager's settings so you can manage the Pi once it boots into Moonlight.
+- **Wired Ethernet** (strongly recommended)
+- A TV or monitor on HDMI. Use **HDMI 0**, the port next to the USB-C power socket.
+- A gaming PC running a streaming host: [Sunshine](https://github.com/LizardByte/Sunshine), [Apollo](https://github.com/ClassicOldSong/Apollo) or [Vibepollo](https://github.com/Nonary/Vibepollo)
+
+## Installation
+
+Run this on the Pi as your **normal user** (not with `sudo`). It asks for your password when it needs it.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/moonlight-pi-setup.sh | bash
+```
+
+If you'd rather read the script before running it:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/moonlight-pi-setup.sh
+less moonlight-pi-setup.sh
+bash moonlight-pi-setup.sh
+```
+
+Have the TV (and receiver, if you use one) switched on while the script runs, so it can detect the HDMI port and play a speaker test.
+
+### Questions the script asks
+
+| Question | Default |
+|---|---|
+| Speaker setup: Stereo, 5.1 or 7.1 | Stereo |
+| Start Moonlight automatically when the Pi boots (recommended) | Yes |
+| Hide boot messages (recommended) | Yes |
+| Install Tailscale | No |
+| Install VirtualHere | No |
+
+You'll see a summary before anything is changed. At the end, the script offers to reboot.
+
+## What the script changes
+
+| Change | Why |
+|---|---|
+| Installs `moonlight-qt` with `apt` (adds Moonlight's official package repository only if needed) | The official build, kept up to date by `apt upgrade` |
+| Adds your user to the `video`, `render`, `input` and `audio` groups | Access to the display, GPU, controllers and audio |
+| Writes `~/.config/moonlight-pi-setup/eglfs.json` | Points Moonlight at the Pi 5's display controller. Without it Moonlight fails with **"Cannot create window: no screens available"** |
+| Writes `~/.asoundrc` | Sends audio to the TV's HDMI port and fixes the surround channel order (see below) |
+| Sets `AUDIODEV=default` | Stops Moonlight wrongly reporting that surround sound isn't supported |
+| Writes `/etc/sysctl.d/90-moonlight-pi-setup.conf` (`net.core.rmem_max`) | Lets Moonlight use a larger network buffer, which helps at high bitrates |
+| Turns on console auto-login, and adds a launch loop to `~/.bash_profile` | Boots straight into Moonlight, and restarts it if it closes |
+| Optional: adds quiet-boot options to `/boot/firmware/cmdline.txt` and `config.txt` | Hides boot text and the splash screen |
+| Optional: installs Tailscale and/or VirtualHere | See below |
+
+Everything the script adds is wrapped in marker comments, and every file is backed up first, so it's safe to **run it again** to change your choices.
+
+### Why the audio fix is needed
+
+On Raspberry Pi OS Lite (plain ALSA, no PipeWire or PulseAudio), Moonlight has two surround-sound problems on the Pi 5. Both come from the Pi's software, not your TV or speakers:
+
+1. **"Your selected surround sound setting is not supported"**: when asked for 5.1, the audio library Moonlight uses looks for an ALSA device called `surround51`, which the Pi's HDMI output doesn't provide.
+2. **Wrong speakers**: the Pi's HDMI output expects the six 5.1 channels in a different order (FL FR LFE FC RL RR) from the one Linux programs send (FL FR RL RR FC LFE). Without the fix, the centre, subwoofer and rear channels come out of the wrong speakers.
+
+The script fixes both. If PipeWire or PulseAudio is installed, it skips the audio changes, because those handle it themselves.
+
+> **7.1 is experimental.** It's built using the same method as the tested 5.1 fix, but hasn't been confirmed on real 7.1 speakers. If any speaker plays the wrong channel, please [open an issue](https://github.com/joshmichael/moonlight-pi-setup/issues) with your TV/receiver model and the output of `speaker-test -c 8 -t wav -l 1`.
+
+## After rebooting
+
+The Pi boots into Moonlight's host list. Pair it with your PC (enter the PIN shown in your host's web UI), then set:
+
+| Setting | Recommended |
+|---|---|
+| Video codec | **HEVC** (the Pi 5 decodes it in hardware; H.264 is software-decoded on the Pi 5) |
+| Resolution | Your TV's resolution, or 1440p / 1080p |
+| Frame rate | 60 FPS |
+| Bitrate | 50–100 Mbit/s on wired Ethernet |
+| V-Sync | On. Off saves a few milliseconds, but may cause tearing |
+| Audio | Match your speakers, and set Windows to the same layout |
+
+Press **Ctrl+Alt+Shift+S** during a stream to show the performance overlay, and **Ctrl+Alt+Shift+Q** (or Select+Start+L1+R1 on a controller) to end it.
+
+To get a command line on the TV, quit Moonlight and press any key within 5 seconds.
+
+## Optional extras
+
+### Tailscale (streaming away from home)
+
+[Tailscale](https://tailscale.com) connects the Pi and your PC over the internet without opening ports on your router.
+
+- Install Tailscale on your **gaming PC** too, signed in to the same account.
+- At home, keep connecting to the PC's normal local address, so streaming doesn't go through Tailscale at all.
+- Away from home, add the PC in Moonlight using its Tailscale address (`100.x.x.x`) and **lower the bitrate** to below your home connection's *upload* speed (often 20–40 Mbit/s).
+- Run `tailscale ping <pc-name>`. If replies say **"via DERP"**, the connection is relayed, which adds latency. A direct connection is better.
+- Wake-on-LAN from Moonlight won't work over Tailscale. Leave the PC on, or wake it with something that's always on at home.
+
+### VirtualHere (sharing USB devices with your PC)
+
+[VirtualHere](https://www.virtualhere.com) makes USB devices plugged into the Pi appear on your PC as if they were plugged in directly. A wired DualSense, for example, keeps its native haptics and adaptive triggers.
+
+- Install the **VirtualHere client** on your PC: https://www.virtualhere.com/usb_client_software
+- The free version shares **one device at a time**. More needs a licence from virtualhere.com.
+- A device shared through VirtualHere goes to the PC, so Moonlight on the Pi won't see it. Use one method per device.
+- Works best at home. Over Tailscale, USB devices may feel laggy.
+
+## Troubleshooting
+
+**Logs**
+
+- Moonlight: `/tmp/moonlight.log` (cleared on reboot)
+- Setup script runs: `~/.local/share/moonlight-pi-setup/`
+
+**No sound, or surround not working**
+
+```bash
+aplay -L | grep -i hdmi                       # Is the HDMI audio device there?
+speaker-test -c 6 -t wav -l 1                 # 5.1 test: each speaker announces its position
+grep -i channels /tmp/moonlight.log | tail -3 # Should say 6 channels for 5.1
+```
+
+If the speaker test fails for 5.1, your TV may only accept stereo from the Pi. To pass surround sound through a TV to a receiver or soundbar, the TV needs **eARC** (not plain ARC). Otherwise, connect the Pi to the receiver directly.
+
+**Stutter or dropped frames**
+
+Check the link speed with `ethtool eth0 | grep -E "Speed|Duplex"`. It should say `1000Mb/s` and `Full`. To test the connection to your PC, install [iperf3](https://iperf.fr) on both. On the PC run `iperf3 -s`, then on the Pi:
+
+```bash
+sudo apt install iperf3
+iperf3 -c <PC_IP> -R -u -b 500M -t 15   # "Lost/Total" should be close to 0%
+```
+
+**"Cannot create window: no screens available"**
+
+Re-run the script. If it persists, check that `~/.config/moonlight-pi-setup/eglfs.json` exists and that `echo $QT_QPA_EGLFS_KMS_CONFIG` prints its path when you log in on the TV.
+
+## Uninstalling
+
+```bash
+~/.local/share/moonlight-pi-setup/moonlight-pi-setup.sh --uninstall
+```
+
+This removes the settings the script added, restores your original `~/.asoundrc` if you had one, turns auto-login back off, and restores the boot options. It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
+
+## Known limitations
+
+- **Raspberry Pi 5 only**, on Raspberry Pi OS Lite (Trixie). Other setups may work with `--force` but aren't supported.
+- **PyroWave** (from Nonary's Moonlight fork) is not supported on the Pi 5. It can be patched to run, but decodes too slowly for 60 fps and is SDR-only.
+- **VRR** isn't available, because the Pi 5's HDMI output doesn't support it.
+- **7.1 audio** is experimental (see above).
+
+## Reporting problems
+
+Please [open an issue](https://github.com/joshmichael/moonlight-pi-setup/issues) and include:
+
+- your Pi model and OS version (`cat /etc/os-release`)
+- TV/receiver model and speaker setup
+- the setup log from `~/.local/share/moonlight-pi-setup/`
+- `/tmp/moonlight.log` if the problem is in Moonlight
+
+## Licence
+
+MIT. Moonlight, Tailscale and VirtualHere are separate projects with their own licences; this script only installs them from their official sources.
