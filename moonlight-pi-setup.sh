@@ -13,7 +13,7 @@
 #
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 
 # Change this to your own repository before publishing.
 REPO_URL="https://github.com/joshmichael/moonlight-pi-setup"
@@ -41,6 +41,9 @@ MOONLIGHT_REPO_SCRIPT="https://dl.cloudsmith.io/public/moonlight-game-streaming/
 TAILSCALE_INSTALL_SCRIPT="https://tailscale.com/install.sh"
 VH_INSTALL_SCRIPT="https://raw.githubusercontent.com/virtualhere/script/main/install_server"
 VH_UNINSTALL_SCRIPT="https://raw.githubusercontent.com/virtualhere/script/main/uninstall_server"
+QUIT_HELPER="/usr/local/bin/moonlight-quit-all"
+QUIT_SERVICE_NAME="moonlight-quit-on-shutdown.service"
+QUIT_SERVICE="/etc/systemd/system/${QUIT_SERVICE_NAME}"
 
 MARK_BEGIN="# >>> moonlight-pi-setup >>>"
 MARK_END="# <<< moonlight-pi-setup <<<"
@@ -55,6 +58,7 @@ DISPLAY_DEVICE=""
 AUDIO_MODE=""          # stereo | 5.1 | 7.1 | system
 OPT_AUTOSTART=0
 OPT_QUIET_BOOT=0
+OPT_QUIT_ON_SHUTDOWN=0
 OPT_TAILSCALE=0
 OPT_VIRTUALHERE=0
 SUDO_KEEPALIVE_PID=""
@@ -372,6 +376,11 @@ ask_questions() {
   if ask_yes_no "    Hide boot messages for a cleaner startup? (recommended)" y; then
     OPT_QUIET_BOOT=1
   fi
+  echo "    When the Pi is switched off (for example with its power button), the game keeps"
+  echo "    running on your PC and the PC can stay stuck on the stream until it's quit."
+  if ask_yes_no "    Quit the running game on your PC when the Pi shuts down? (recommended)" y; then
+    OPT_QUIT_ON_SHUTDOWN=1
+  fi
   if ask_yes_no "    Install Tailscale, to stream when you're away from home?" n; then
     OPT_TAILSCALE=1
   fi
@@ -388,6 +397,7 @@ ask_questions() {
   esac
   info "Auto-start:       $( (( OPT_AUTOSTART )) && echo yes || echo no)"
   info "Hide boot text:   $( (( OPT_QUIET_BOOT )) && echo yes || echo no)"
+  info "Quit on shutdown: $( (( OPT_QUIT_ON_SHUTDOWN )) && echo yes || echo no)"
   info "Tailscale:        $( (( OPT_TAILSCALE )) && echo yes || echo no)"
   info "VirtualHere:      $( (( OPT_VIRTUALHERE )) && echo yes || echo no)"
   echo
@@ -696,6 +706,56 @@ setup_quiet_boot() {
   ok "Boot messages and the splash screen will be hidden"
 }
 
+setup_quit_on_shutdown() {
+  if (( ! OPT_QUIT_ON_SHUTDOWN )); then
+    return 0
+  fi
+  step "Setting up 'quit game on shutdown'"
+
+  sudo tee "$QUIT_HELPER" > /dev/null <<'EOF'
+#!/usr/bin/env bash
+# Installed by moonlight-pi-setup.
+# Asks every paired Moonlight host to quit its running app. Hosts with nothing
+# running are unaffected. Run automatically when the Pi shuts down.
+CONF="$HOME/.config/Moonlight Game Streaming Project/Moonlight.conf"
+[ -f "$CONF" ] || exit 0
+export QT_QPA_PLATFORM=offscreen
+grep -E '^[0-9]+\\hostname=' "$CONF" | cut -d= -f2- | sort -u | while read -r host; do
+  [ -n "$host" ] || continue
+  echo "Quitting any running app on: $host"
+  timeout 10 moonlight-qt quit "$host" || echo "  (no response from $host)"
+done
+exit 0
+EOF
+  sudo chmod 755 "$QUIT_HELPER"
+
+  sudo tee "$QUIT_SERVICE" > /dev/null <<EOF
+# Installed by moonlight-pi-setup.
+[Unit]
+Description=Tell Moonlight hosts to quit the running app when the Pi shuts down
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=${USER_NAME}
+Environment=HOME=${HOME}
+ExecStart=/bin/true
+ExecStop=${QUIT_HELPER}
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now "$QUIT_SERVICE_NAME"
+  state_set quit_on_shutdown 1
+  ok "The running game on your PC will be quit when the Pi shuts down"
+  info "Note: this closes the game, so save before switching the Pi off."
+  info "Test it any time with: ${QUIT_HELPER}"
+}
+
 install_tailscale() {
   (( OPT_TAILSCALE )) || return 0
   step "Installing Tailscale"
@@ -866,6 +926,17 @@ do_uninstall() {
     ok "Restored the boot splash screen"
   fi
 
+  # Quit on shutdown
+  if [[ -f $QUIT_SERVICE ]]; then
+    sudo systemctl disable --now "$QUIT_SERVICE_NAME" > /dev/null 2>&1 || true
+    sudo rm -f "$QUIT_SERVICE"
+    sudo systemctl daemon-reload
+    ok "Removed the quit-on-shutdown service"
+  fi
+  if [[ -f $QUIT_HELPER ]] && grep -q "moonlight-pi-setup" "$QUIT_HELPER"; then
+    sudo rm -f "$QUIT_HELPER"
+  fi
+
   # Optional software
   if package_installed moonlight-qt && ask_yes_no "    Also uninstall Moonlight?" n; then
     sudo apt-get remove -y moonlight-qt
@@ -949,6 +1020,7 @@ main() {
   setup_autologin
   setup_bash_profile
   setup_quiet_boot
+  setup_quit_on_shutdown
   install_tailscale
   install_virtualhere
   finish_install

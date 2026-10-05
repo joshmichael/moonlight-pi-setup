@@ -39,6 +39,7 @@ Have the TV (and receiver, if you use one) switched on while the script runs, so
 | Speaker setup: Stereo, 5.1 or 7.1 | Stereo |
 | Start Moonlight automatically when the Pi boots (recommended) | Yes |
 | Hide boot messages (recommended) | Yes |
+| Quit the running game on your PC when the Pi shuts down (recommended) | Yes |
 | Install Tailscale | No |
 | Install VirtualHere | No |
 
@@ -56,6 +57,7 @@ You'll see a summary before anything is changed. At the end, the script offers t
 | Writes `/etc/sysctl.d/90-moonlight-pi-setup.conf` (`net.core.rmem_max`) | Lets Moonlight use a larger network buffer, which helps at high bitrates |
 | Turns on console auto-login, and adds a launch loop to `~/.bash_profile` | Boots straight into Moonlight, and restarts it if it closes |
 | Optional: adds quiet-boot options to `/boot/firmware/cmdline.txt` and `config.txt` | Hides boot text and the splash screen |
+| Optional: installs `/usr/local/bin/moonlight-quit-all` and the `moonlight-quit-on-shutdown` service | Ends the game on your PC when the Pi is switched off (see below) |
 | Optional: installs Tailscale and/or VirtualHere | See below |
 
 Everything the script adds is wrapped in marker comments, and every file is backed up first, so it's safe to **run it again** to change your choices.
@@ -89,6 +91,17 @@ Press **Ctrl+Alt+Shift+S** during a stream to show the performance overlay, and 
 To get a command line on the TV, quit Moonlight and press any key within 5 seconds.
 
 ## Optional extras
+
+### Quit the game when the Pi is switched off
+
+If you switch the Pi off (for example with its power button) without quitting the game in Moonlight first, your PC keeps the game running, because streaming hosts are designed to let you reconnect and carry on. With a virtual display (Apollo or Vibepollo), this can leave the PC stuck on the stream until the session is ended.
+
+With this option, the Pi tells every PC it's paired with to quit its running game as it shuts down. PCs with nothing running aren't affected. The command is sent before the network is switched off, and if a PC doesn't respond the Pi gives up after 10 seconds per PC, so shutdown is never held up for long.
+
+- This **closes the game**, the same as choosing Quit in Moonlight, so save first.
+- If someone else is streaming from one of your paired PCs on another device, their game will be closed too.
+- To test it without shutting down, start a stream and run `moonlight-quit-all` over SSH.
+- To see what happened at the last shutdown: `journalctl -b -1 -u moonlight-quit-on-shutdown --no-pager`
 
 ### Tailscale (streaming away from home)
 
@@ -145,7 +158,7 @@ Re-run the script. If it persists, check that `~/.config/moonlight-pi-setup/eglf
 ~/.local/share/moonlight-pi-setup/moonlight-pi-setup.sh --uninstall
 ```
 
-This removes the settings the script added, restores your original `~/.asoundrc` if you had one, turns auto-login back off, and restores the boot options. It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
+This removes the settings the script added, restores your original `~/.asoundrc` if you had one, turns auto-login back off, restores the boot options, and removes the quit-on-shutdown service. It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
 
 ## Known limitations
 
