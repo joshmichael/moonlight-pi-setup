@@ -414,7 +414,7 @@ preflight() {
 # ---------------------------------------------------------------------------
 ask_questions() {
   step "Setup options"
-  if [[ -f $STATE_FILE ]]; then
+  if [[ -n $(state_get version) ]]; then
     info "The defaults below are the answers you gave last time."
   fi
 
@@ -1026,11 +1026,22 @@ paired_hosts() {
     END { for (n in host) if (host[n] != "" && cert[n] != "" && cert[n] != "@ByteArray()") print host[n] }
   ' "$CONF" | sort -u
 }
-paired_hosts | while read -r host; do
-  echo "Quitting any running app on: $host"
-  timeout 10 moonlight-qt quit "$host" > /dev/null 2>&1 \
-    && echo "  done" || echo "  (no response from $host)"
-done
+quit_all() {
+  paired_hosts | while read -r host; do
+    echo "Quitting any running app on: $host"
+    timeout 10 moonlight-qt quit "$host" > /dev/null 2>&1 \
+      && echo "  done" || echo "  (no response from $host)"
+  done
+}
+# Raspberry Pi OS keeps the system journal in memory only, so it's gone after a
+# reboot. Also keep a short log on disk so the last shutdown can be checked.
+LOG="$HOME/.local/share/moonlight-pi-setup/quit-on-shutdown.log"
+mkdir -p "$(dirname "$LOG")"
+{
+  echo "--- $(date '+%Y-%m-%d %H:%M:%S') ($([ -n "${INVOCATION_ID:-}" ] && echo shutdown || echo "run by hand"))"
+  quit_all
+} 2>&1 | tee -a "$LOG"
+tail -n 200 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
 exit 0
 EOF
   sudo chmod 755 "$QUIT_HELPER"
@@ -1059,6 +1070,7 @@ EOF
   ok "The running game on your PC will be quit when the Pi shuts down"
   info "Note: this closes the game, so save before switching the Pi off."
   info "Test it any time with: ${QUIT_HELPER}"
+  info "What happened at the last shutdown: ${STATE_DIR}/quit-on-shutdown.log"
 }
 
 install_tailscale() {
@@ -1248,7 +1260,23 @@ do_uninstall() {
     curl -fsSL "$VH_UNINSTALL_SCRIPT" | sudo sh || warn "Could not remove VirtualHere."
   fi
 
-  rm -f "$STATE_FILE"
+  # Forget the settings, but remember the software this script installed that is
+  # still there, so a later --uninstall (after reinstalling) can still remove it.
+  local kept=""
+  if [[ $(state_get moonlight_repo_added) == 1 ]] && package_installed moonlight-qt; then
+    kept+=$'moonlight_repo_added=1\n'
+  fi
+  if [[ $(state_get tailscale_installed_by_script) == 1 ]] && command -v tailscale > /dev/null 2>&1; then
+    kept+=$'tailscale_installed_by_script=1\n'
+  fi
+  if [[ $(state_get virtualhere_installed_by_script) == 1 ]] && virtualhere_installed; then
+    kept+=$'virtualhere_installed_by_script=1\n'
+  fi
+  if [[ -n $kept ]]; then
+    printf '%s' "$kept" > "$STATE_FILE"
+  else
+    rm -f "$STATE_FILE"
+  fi
   echo
   info "Backups of the files this script changed are kept in: ${BACKUP_DIR}"
   info "Your user was left in the video, render, input and audio groups (this is harmless)."

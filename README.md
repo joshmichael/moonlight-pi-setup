@@ -117,7 +117,7 @@ With this option, the Pi tells every PC it's paired with to quit its running gam
 - This **closes the game**, the same as choosing Quit in Moonlight, so save first.
 - If someone else is streaming from one of your paired PCs on another device, their game will be closed too.
 - To test it without shutting down, start a stream and run `moonlight-quit-all` over SSH.
-- To see what happened at the last shutdown: `journalctl -b -1 -u moonlight-quit-on-shutdown --no-pager`
+- To see what happened at recent shutdowns: `cat ~/.local/share/moonlight-pi-setup/quit-on-shutdown.log`. (Raspberry Pi OS clears the system journal at every reboot, so `journalctl -b -1` won't show it.)
 
 ### Tailscale (streaming away from home)
 
