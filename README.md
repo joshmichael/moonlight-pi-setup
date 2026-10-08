@@ -41,10 +41,13 @@ Have the TV (and receiver, if you use one) switched on while the script runs, so
 | Speaker setup: Stereo, 5.1 or 7.1 (not asked if you keep the desktop, see below) | Stereo |
 | Hide boot messages (recommended) | Yes |
 | Quit the running game on your PC when the Pi shuts down (recommended) | Yes |
-| Install Tailscale | No |
-| Install VirtualHere | No |
+| **Wi-Fi only:** Turn off Wi-Fi power saving (recommended on Wi-Fi) | Yes |
+| Install Tailscale (not asked if it's already installed) | No |
+| Install VirtualHere (not asked if it's already installed) | No |
 
 You'll see a summary before anything is changed. At the end, the script offers to reboot.
+
+When you re-run the script, the defaults are the answers you gave last time, so you can just press Enter through everything except the setting you want to change.
 
 ## What the script changes
 
@@ -59,9 +62,10 @@ You'll see a summary before anything is changed. At the end, the script offers t
 | Switches the Pi to boot to the console with auto-login, and adds a launch loop to `~/.bash_profile` | Boots straight into Moonlight, and restarts it if it closes. How the Pi booted before (console or desktop) is remembered and restored on uninstall |
 | Optional: adds quiet-boot options to `/boot/firmware/cmdline.txt` and `config.txt` | Hides boot text and the splash screen |
 | Optional: installs `/usr/local/bin/moonlight-quit-all` and the `moonlight-quit-on-shutdown` service | Ends the game on your PC when the Pi is switched off (see below) |
+| Optional, on Wi-Fi: writes `/etc/NetworkManager/conf.d/90-moonlight-pi-setup-wifi.conf` (`wifi.powersave = 2`) | Wi-Fi power saving makes the Pi's Wi-Fi doze between packets, which causes stutter and lag spikes |
 | Optional: installs Tailscale and/or VirtualHere | See below |
 
-Everything the script adds is wrapped in marker comments, and every file is backed up first, so it's safe to **run it again** to change your choices.
+Everything the script adds is wrapped in marker comments, and every file is backed up first, so it's safe to **run it again** to change your choices. Answering No to an option you turned on before undoes it (for example, boot messages come back and the quit-on-shutdown service is removed).
 
 ### Why the audio fix is needed
 
@@ -113,7 +117,7 @@ With this option, the Pi tells every PC it's paired with to quit its running gam
 - This **closes the game**, the same as choosing Quit in Moonlight, so save first.
 - If someone else is streaming from one of your paired PCs on another device, their game will be closed too.
 - To test it without shutting down, start a stream and run `moonlight-quit-all` over SSH.
-- To see what happened at the last shutdown: `journalctl -b -1 -u moonlight-quit-on-shutdown --no-pager`
+- To see what happened at recent shutdowns: `cat ~/.local/share/moonlight-pi-setup/quit-on-shutdown.log`. (Raspberry Pi OS clears the system journal at every reboot, so `journalctl -b -1` won't show it.)
 
 ### Tailscale (streaming away from home)
 
@@ -172,7 +176,7 @@ Re-run the script. If it persists, check that `~/.config/moonlight-pi-setup/eglf
 ~/.local/share/moonlight-pi-setup/moonlight-pi-setup.sh --uninstall
 ```
 
-This removes the settings the script added, restores your original `~/.asoundrc` if you had one, puts back how the Pi originally booted (to the desktop, or to a console login on Lite), restores the boot options, and removes the quit-on-shutdown service. It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
+This removes the settings the script added, restores your original `~/.asoundrc` if you had one, puts back how the Pi originally booted (to the desktop, or to a console login on Lite), restores the boot options and Wi-Fi power saving, and removes the quit-on-shutdown service (without quitting a game that's running at the time). It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
 
 ## Known limitations
 

@@ -13,7 +13,7 @@
 #
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.4.0"
 
 # Change this to your own repository before publishing.
 REPO_URL="https://github.com/joshmichael/moonlight-pi-setup"
@@ -37,6 +37,7 @@ CMDLINE_FILE="/boot/firmware/cmdline.txt"
 CONFIG_TXT="/boot/firmware/config.txt"
 AUTOLOGIN_DROPIN="/etc/systemd/system/getty@tty1.service.d/autologin.conf"
 LIGHTDM_CONF="/etc/lightdm/lightdm.conf"
+NM_WIFI_CONF="/etc/NetworkManager/conf.d/90-moonlight-pi-setup-wifi.conf"
 
 MOONLIGHT_REPO_SCRIPT="https://dl.cloudsmith.io/public/moonlight-game-streaming/moonlight-qt/setup.deb.sh"
 TAILSCALE_INSTALL_SCRIPT="https://tailscale.com/install.sh"
@@ -64,6 +65,9 @@ OPT_QUIET_BOOT=0
 OPT_QUIT_ON_SHUTDOWN=0
 OPT_TAILSCALE=0
 OPT_VIRTUALHERE=0
+OPT_WIFI_POWERSAVE_OFF=0
+NET_IFACE=""
+ON_WIFI=0
 SUDO_KEEPALIVE_PID=""
 
 # ---------------------------------------------------------------------------
@@ -144,6 +148,16 @@ state_get() {
   grep -m1 "^${key}=" <<<"$content" | cut -d= -f2- || true
 }
 
+# previous_choice <state key> <default y|n> -- the answer from the last run, so
+# that re-running the script to change one setting keeps the others as they were.
+previous_choice() {
+  case "$(state_get "$1")" in
+    1) echo y ;;
+    0) echo n ;;
+    *) echo "$2" ;;
+  esac
+}
+
 # backup_file <path> [sudo]
 backup_file() {
   local file=$1 use_sudo=${2:-} dest
@@ -182,6 +196,14 @@ write_cmdline() {
     ending=$'\n'
   fi
   printf '%s%s' "$1" "$ending" | sudo tee "$CMDLINE_FILE" > /dev/null
+}
+
+# Was ~/.asoundrc written by this script?
+asoundrc_is_ours() {
+  local first=""
+  [[ -f $ASOUNDRC ]] || return 1
+  IFS= read -r first < "$ASOUNDRC" || true
+  [[ $first == "${ASOUND_HEADER}"* ]]
 }
 
 package_installed() {
@@ -250,6 +272,12 @@ boot_behaviour_name() {
     B4) echo "desktop with automatic login" ;;
     *)  echo "unknown" ;;
   esac
+}
+
+virtualhere_installed() {
+  local units
+  units=$(systemctl list-unit-files 2>/dev/null || true)
+  grep -qi virtualhere <<<"$units"
 }
 
 audio_server_present() {
@@ -349,12 +377,20 @@ preflight() {
     warn "HDMI audio device vc4hdmi${HDMI_PORT} was not found. Audio may not work until the TV is connected and the Pi is rebooted."
   fi
 
-  # Network
+  # Network: ask the kernel which interface it would use to reach the internet,
+  # which picks the right one when both Ethernet and Wi-Fi are connected.
   local iface speed duplex
-  iface=$(ip -o route show default 2>/dev/null | awk '{print $5; exit}')
+  iface=$(ip route get 1.1.1.1 2>/dev/null \
+    | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}' || true)
+  if [[ -z $iface ]]; then
+    iface=$(ip -o route show default 2>/dev/null \
+      | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}' || true)
+  fi
+  NET_IFACE=$iface
   if [[ -z $iface ]]; then
     die "No network connection detected. This script needs internet access."
-  elif [[ $iface == wl* ]]; then
+  elif [[ -d /sys/class/net/${iface}/wireless || $iface == wl* ]]; then
+    ON_WIFI=1
     warn "You're connected over Wi-Fi (${iface}). Wired Ethernet is strongly recommended for streaming."
   else
     speed=$(cat "/sys/class/net/${iface}/speed" 2>/dev/null || true)
@@ -378,16 +414,21 @@ preflight() {
 # ---------------------------------------------------------------------------
 ask_questions() {
   step "Setup options"
+  if [[ -n $(state_get version) ]]; then
+    info "The defaults below are the answers you gave last time."
+  fi
 
   if (( IS_DESKTOP )); then
     echo "    This Pi boots to the desktop. For the best performance, and for HDR, Moonlight"
     echo "    can start on its own instead of the desktop. The desktop stays installed, and"
     echo "    uninstalling this setup switches the Pi back to booting to the desktop."
-    if ask_yes_no "    Boot straight into Moonlight instead of the desktop? (recommended)" y; then
+    if ask_yes_no "    Boot straight into Moonlight instead of the desktop? (recommended)" \
+        "$(previous_choice autostart y)"; then
       OPT_AUTOSTART=1
     fi
   else
-    if ask_yes_no "    Start Moonlight automatically when the Pi boots? (recommended)" y; then
+    if ask_yes_no "    Start Moonlight automatically when the Pi boots? (recommended)" \
+        "$(previous_choice autostart y)"; then
       OPT_AUTOSTART=1
     fi
   fi
@@ -405,11 +446,15 @@ ask_questions() {
     echo "      1) Stereo (TV speakers, soundbar or headphones)"
     echo "      2) 5.1 surround"
     echo "      3) 7.1 surround"
-    local choice
+    local choice default_choice=1
+    case "$(state_get audio_mode)" in
+      5.1) default_choice=2 ;;
+      7.1) default_choice=3 ;;
+    esac
     while true; do
-      printf '    Choose 1, 2 or 3 [1]: '
+      printf '    Choose 1, 2 or 3 [%s]: ' "$default_choice"
       read_tty choice
-      case "${choice:-1}" in
+      case "${choice:-$default_choice}" in
         1) AUDIO_MODE="stereo"; break ;;
         2) AUDIO_MODE="5.1"; break ;;
         3)
@@ -426,18 +471,38 @@ ask_questions() {
     done
   fi
 
-  if ask_yes_no "    Hide boot messages for a cleaner startup? (recommended)" y; then
+  if ask_yes_no "    Hide boot messages for a cleaner startup? (recommended)" \
+      "$(previous_choice quiet_boot y)"; then
     OPT_QUIET_BOOT=1
   fi
   echo "    When the Pi is switched off (for example with its power button), the game keeps"
   echo "    running on your PC and the PC can stay stuck on the stream until it's quit."
-  if ask_yes_no "    Quit the running game on your PC when the Pi shuts down? (recommended)" y; then
+  if ask_yes_no "    Quit the running game on your PC when the Pi shuts down? (recommended)" \
+      "$(previous_choice quit_on_shutdown y)"; then
     OPT_QUIT_ON_SHUTDOWN=1
   fi
-  if ask_yes_no "    Install Tailscale, to stream when you're away from home?" n; then
+
+  # Wi-Fi power saving: only asked while on Wi-Fi. Otherwise keep the last answer,
+  # so plugging in Ethernet for one run doesn't undo it.
+  if (( ON_WIFI )) && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    echo "    Wi-Fi power saving makes the Pi's Wi-Fi doze between packets, which causes"
+    echo "    stutter and lag spikes when streaming."
+    if ask_yes_no "    Turn off Wi-Fi power saving? (recommended on Wi-Fi)" \
+        "$(previous_choice wifi_powersave_off y)"; then
+      OPT_WIFI_POWERSAVE_OFF=1
+    fi
+  elif [[ -f $NM_WIFI_CONF ]]; then
+    OPT_WIFI_POWERSAVE_OFF=1
+  fi
+
+  if command -v tailscale > /dev/null 2>&1; then
+    info "Tailscale is already installed. Skipping that question."
+  elif ask_yes_no "    Install Tailscale, to stream when you're away from home?" n; then
     OPT_TAILSCALE=1
   fi
-  if ask_yes_no "    Install VirtualHere, to share USB devices plugged into the Pi with your PC?" n; then
+  if virtualhere_installed; then
+    info "VirtualHere is already installed. Skipping that question."
+  elif ask_yes_no "    Install VirtualHere, to share USB devices plugged into the Pi with your PC?" n; then
     OPT_VIRTUALHERE=1
   fi
 
@@ -455,8 +520,19 @@ ask_questions() {
   fi
   info "Hide boot text:   $( (( OPT_QUIET_BOOT )) && echo yes || echo no)"
   info "Quit on shutdown: $( (( OPT_QUIT_ON_SHUTDOWN )) && echo yes || echo no)"
-  info "Tailscale:        $( (( OPT_TAILSCALE )) && echo yes || echo no)"
-  info "VirtualHere:      $( (( OPT_VIRTUALHERE )) && echo yes || echo no)"
+  if (( ON_WIFI || OPT_WIFI_POWERSAVE_OFF )); then
+    info "Wi-Fi power save: $( (( OPT_WIFI_POWERSAVE_OFF )) && echo off || echo "left on")"
+  fi
+  if command -v tailscale > /dev/null 2>&1; then
+    info "Tailscale:        already installed"
+  else
+    info "Tailscale:        $( (( OPT_TAILSCALE )) && echo yes || echo no)"
+  fi
+  if virtualhere_installed; then
+    info "VirtualHere:      already installed"
+  else
+    info "VirtualHere:      $( (( OPT_VIRTUALHERE )) && echo yes || echo no)"
+  fi
   echo
   ask_yes_no "    Go ahead with these settings?" y || die "Cancelled. Nothing was changed."
 }
@@ -608,11 +684,33 @@ EOF
   esac
 }
 
+# Remove our ~/.asoundrc and put back the user's original, if they had one.
+remove_asoundrc() {
+  asoundrc_is_ours || return 0
+  rm -f "$ASOUNDRC"
+  local original
+  original=$(state_get asoundrc_original)
+  if [[ -n $original && -f $original ]]; then
+    cp -a "$original" "$ASOUNDRC"
+    ok "Restored your original ${ASOUNDRC}"
+  else
+    ok "Removed ${ASOUNDRC}"
+  fi
+}
+
 setup_audio() {
-  [[ $AUDIO_MODE == "system" ]] && return 0
+  if [[ $AUDIO_MODE == "system" ]]; then
+    # An earlier run may have written ~/.asoundrc. Left in place, it would take
+    # the HDMI audio away from the desktop's audio server.
+    if asoundrc_is_ours; then
+      step "Handing audio back to the desktop"
+      remove_asoundrc
+    fi
+    return 0
+  fi
   step "Configuring ${AUDIO_MODE} audio"
 
-  if [[ -f $ASOUNDRC ]] && ! head -n1 "$ASOUNDRC" | grep -q "^${ASOUND_HEADER}"; then
+  if [[ -f $ASOUNDRC ]] && ! asoundrc_is_ours; then
     # A file we didn't create: keep a copy so --uninstall can put it back.
     mkdir -p "$BACKUP_DIR"
     local dest="${BACKUP_DIR}/asoundrc.original"
@@ -668,6 +766,28 @@ setup_network() {
     "net.core.rmem_max=33554432" | sudo tee "$SYSCTL_FILE" > /dev/null
   sudo sysctl -p "$SYSCTL_FILE" > /dev/null
   ok "Raised the network receive buffer limit (net.core.rmem_max)"
+
+  if (( OPT_WIFI_POWERSAVE_OFF )); then
+    printf '%s\n%s\n%s\n' \
+      "# Added by moonlight-pi-setup: Wi-Fi power saving causes lag spikes when streaming" \
+      "[connection]" \
+      "wifi.powersave = 2" | sudo tee "$NM_WIFI_CONF" > /dev/null
+    sudo systemctl reload NetworkManager 2>/dev/null || true
+    # The setting above applies from the next reconnect; this applies it right away.
+    if (( ON_WIFI )) && command -v iw > /dev/null 2>&1; then
+      sudo iw dev "$NET_IFACE" set power_save off 2>/dev/null || true
+    fi
+    ok "Turned off Wi-Fi power saving"
+  else
+    remove_wifi_powersave
+  fi
+}
+
+remove_wifi_powersave() {
+  [[ -f $NM_WIFI_CONF ]] || return 0
+  sudo rm -f "$NM_WIFI_CONF"
+  sudo systemctl reload NetworkManager 2>/dev/null || true
+  ok "Turned Wi-Fi power saving back on (takes effect after a reboot)"
 }
 
 setup_autologin() {
@@ -800,8 +920,39 @@ EOF
   ok "Saved Moonlight settings$( (( OPT_AUTOSTART )) && echo " and auto-start")"
 }
 
+quiet_boot_enabled() {
+  [[ -n $(state_get quiet_tokens_added) ]] \
+    || { [[ -f $CONFIG_TXT ]] && grep -qF "$MARK_BEGIN" "$CONFIG_TXT"; }
+}
+
+# Undo setup_quiet_boot, removing only the boot options this script added.
+remove_quiet_boot() {
+  local tokens token line
+  tokens=$(state_get quiet_tokens_added)
+  if [[ -n $tokens && -f $CMDLINE_FILE ]]; then
+    backup_file "$CMDLINE_FILE" sudo
+    line=$(head -n1 "$CMDLINE_FILE")
+    for token in $tokens; do
+      line=$(sed -E "s/(^| )${token//./\\.}( |$)/ /g" <<<"$line")
+    done
+    line=$(sed -E 's/ +/ /g; s/^ //; s/ $//' <<<"$line")
+    write_cmdline "$line"
+    state_set quiet_tokens_added ""
+    ok "Restored boot messages"
+  fi
+  if [[ -f $CONFIG_TXT ]] && grep -qF "$MARK_BEGIN" "$CONFIG_TXT"; then
+    backup_file "$CONFIG_TXT" sudo
+    remove_block "$CONFIG_TXT" sudo
+    ok "Restored the boot splash screen"
+  fi
+}
+
 setup_quiet_boot() {
   if (( ! OPT_QUIET_BOOT )); then
+    if quiet_boot_enabled; then
+      step "Showing boot messages again"
+      remove_quiet_boot
+    fi
     return 0
   fi
   step "Hiding boot messages"
@@ -829,12 +980,31 @@ setup_quiet_boot() {
   backup_file "$CONFIG_TXT" sudo
   remove_block "$CONFIG_TXT" sudo
   printf '%s\n[all]\ndisable_splash=1\n%s\n' "$MARK_BEGIN" "$MARK_END" | sudo tee -a "$CONFIG_TXT" > /dev/null
-  state_set quiet_boot 1
   ok "Boot messages and the splash screen will be hidden"
+}
+
+# Remove the quit-on-shutdown service. The helper goes first: stopping the
+# service runs it, which would quit a game that's being played right now.
+remove_quit_on_shutdown() {
+  [[ -f $QUIT_SERVICE || -f $QUIT_HELPER ]] || return 0
+  if [[ -f $QUIT_HELPER ]] && grep -q "moonlight-pi-setup" "$QUIT_HELPER"; then
+    sudo rm -f "$QUIT_HELPER"
+  fi
+  if [[ -f $QUIT_SERVICE ]]; then
+    sudo systemctl disable --now "$QUIT_SERVICE_NAME" > /dev/null 2>&1 || true
+    sudo rm -f "$QUIT_SERVICE"
+    sudo systemctl daemon-reload
+    sudo systemctl reset-failed "$QUIT_SERVICE_NAME" > /dev/null 2>&1 || true
+    ok "Removed the quit-on-shutdown service"
+  fi
 }
 
 setup_quit_on_shutdown() {
   if (( ! OPT_QUIT_ON_SHUTDOWN )); then
+    if [[ -f $QUIT_SERVICE ]]; then
+      step "Turning off 'quit game on shutdown'"
+      remove_quit_on_shutdown
+    fi
     return 0
   fi
   step "Setting up 'quit game on shutdown'"
@@ -856,11 +1026,22 @@ paired_hosts() {
     END { for (n in host) if (host[n] != "" && cert[n] != "" && cert[n] != "@ByteArray()") print host[n] }
   ' "$CONF" | sort -u
 }
-paired_hosts | while read -r host; do
-  echo "Quitting any running app on: $host"
-  timeout 10 moonlight-qt quit "$host" > /dev/null 2>&1 \
-    && echo "  done" || echo "  (no response from $host)"
-done
+quit_all() {
+  paired_hosts | while read -r host; do
+    echo "Quitting any running app on: $host"
+    timeout 10 moonlight-qt quit "$host" > /dev/null 2>&1 \
+      && echo "  done" || echo "  (no response from $host)"
+  done
+}
+# Raspberry Pi OS keeps the system journal in memory only, so it's gone after a
+# reboot. Also keep a short log on disk so the last shutdown can be checked.
+LOG="$HOME/.local/share/moonlight-pi-setup/quit-on-shutdown.log"
+mkdir -p "$(dirname "$LOG")"
+{
+  echo "--- $(date '+%Y-%m-%d %H:%M:%S') ($([ -n "${INVOCATION_ID:-}" ] && echo shutdown || echo "run by hand"))"
+  quit_all
+} 2>&1 | tee -a "$LOG"
+tail -n 200 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
 exit 0
 EOF
   sudo chmod 755 "$QUIT_HELPER"
@@ -886,10 +1067,10 @@ WantedBy=multi-user.target
 EOF
   sudo systemctl daemon-reload
   sudo systemctl enable --now "$QUIT_SERVICE_NAME"
-  state_set quit_on_shutdown 1
   ok "The running game on your PC will be quit when the Pi shuts down"
   info "Note: this closes the game, so save before switching the Pi off."
   info "Test it any time with: ${QUIT_HELPER}"
+  info "What happened at the last shutdown: ${STATE_DIR}/quit-on-shutdown.log"
 }
 
 install_tailscale() {
@@ -916,9 +1097,7 @@ install_tailscale() {
 install_virtualhere() {
   (( OPT_VIRTUALHERE )) || return 0
   step "Installing the VirtualHere USB server"
-  local units
-  units=$(systemctl list-unit-files 2>/dev/null || true)
-  if grep -qi virtualhere <<<"$units"; then
+  if virtualhere_installed; then
     info "VirtualHere is already installed."
     return 0
   fi
@@ -951,6 +1130,10 @@ finish_install() {
   state_set version "$SCRIPT_VERSION"
   state_set audio_mode "$AUDIO_MODE"
   state_set hdmi_port "$HDMI_PORT"
+  state_set autostart "$OPT_AUTOSTART"
+  state_set quiet_boot "$OPT_QUIET_BOOT"
+  state_set quit_on_shutdown "$OPT_QUIT_ON_SHUTDOWN"
+  state_set wifi_powersave_off "$OPT_WIFI_POWERSAVE_OFF"
 
   step "All done"
   info "Recommended Moonlight settings (in Moonlight's settings screen):"
@@ -1022,17 +1205,7 @@ do_uninstall() {
   fi
 
   # ~/.asoundrc
-  if [[ -f $ASOUNDRC ]] && head -n1 "$ASOUNDRC" | grep -q "^${ASOUND_HEADER}"; then
-    rm -f "$ASOUNDRC"
-    local original
-    original=$(state_get asoundrc_original)
-    if [[ -n $original && -f $original ]]; then
-      cp -a "$original" "$ASOUNDRC"
-      ok "Restored your original ${ASOUNDRC}"
-    else
-      ok "Removed ${ASOUNDRC}"
-    fi
-  fi
+  remove_asoundrc
 
   # Display config
   if [[ -d $CONFIG_DIR ]]; then
@@ -1061,33 +1234,14 @@ do_uninstall() {
     esac
   fi
 
+  # Wi-Fi power saving
+  remove_wifi_powersave
+
   # Quiet boot
-  local tokens token line
-  tokens=$(state_get quiet_tokens_added)
-  if [[ -n $tokens && -f $CMDLINE_FILE ]]; then
-    line=$(head -n1 "$CMDLINE_FILE")
-    for token in $tokens; do
-      line=$(sed -E "s/(^| )${token//./\\.}( |$)/ /g" <<<"$line")
-    done
-    line=$(sed -E 's/ +/ /g; s/^ //; s/ $//' <<<"$line")
-    write_cmdline "$line"
-    ok "Restored boot messages"
-  fi
-  if [[ -f $CONFIG_TXT ]] && grep -qF "$MARK_BEGIN" "$CONFIG_TXT"; then
-    remove_block "$CONFIG_TXT" sudo
-    ok "Restored the boot splash screen"
-  fi
+  remove_quiet_boot
 
   # Quit on shutdown
-  if [[ -f $QUIT_SERVICE ]]; then
-    sudo systemctl disable --now "$QUIT_SERVICE_NAME" > /dev/null 2>&1 || true
-    sudo rm -f "$QUIT_SERVICE"
-    sudo systemctl daemon-reload
-    ok "Removed the quit-on-shutdown service"
-  fi
-  if [[ -f $QUIT_HELPER ]] && grep -q "moonlight-pi-setup" "$QUIT_HELPER"; then
-    sudo rm -f "$QUIT_HELPER"
-  fi
+  remove_quit_on_shutdown
 
   # Optional software
   if package_installed moonlight-qt && ask_yes_no "    Also uninstall Moonlight?" n; then
@@ -1106,7 +1260,23 @@ do_uninstall() {
     curl -fsSL "$VH_UNINSTALL_SCRIPT" | sudo sh || warn "Could not remove VirtualHere."
   fi
 
-  rm -f "$STATE_FILE"
+  # Forget the settings, but remember the software this script installed that is
+  # still there, so a later --uninstall (after reinstalling) can still remove it.
+  local kept=""
+  if [[ $(state_get moonlight_repo_added) == 1 ]] && package_installed moonlight-qt; then
+    kept+=$'moonlight_repo_added=1\n'
+  fi
+  if [[ $(state_get tailscale_installed_by_script) == 1 ]] && command -v tailscale > /dev/null 2>&1; then
+    kept+=$'tailscale_installed_by_script=1\n'
+  fi
+  if [[ $(state_get virtualhere_installed_by_script) == 1 ]] && virtualhere_installed; then
+    kept+=$'virtualhere_installed_by_script=1\n'
+  fi
+  if [[ -n $kept ]]; then
+    printf '%s' "$kept" > "$STATE_FILE"
+  else
+    rm -f "$STATE_FILE"
+  fi
   echo
   info "Backups of the files this script changed are kept in: ${BACKUP_DIR}"
   info "Your user was left in the video, render, input and audio groups (this is harmless)."
