@@ -126,8 +126,15 @@ With this option, the Pi tells every PC it's paired with to quit its running gam
 [Tailscale](https://tailscale.com) connects the Pi and your PC over the internet without opening ports on your router.
 
 - Install Tailscale on your **gaming PC** too, signed in to the same account. The [PC setup script](#setting-up-the-gaming-pc) can do this.
-- At home, keep connecting to the PC's normal local address, so streaming doesn't go through Tailscale at all.
-- Away from home, add the PC in Moonlight using its Tailscale address (`100.x.x.x`) and **lower the bitrate** to below your home connection's *upload* speed (often 20–40 Mbit/s).
+
+**Before you take the Pi away from home**, do these once while you're still at home:
+
+1. **Give Moonlight your PC's Tailscale address.** Moonlight only knows the PC's home-network address, so away from home the PC would show as offline. Find the PC's Tailscale address (it starts with `100.`) in the Tailscale app on the PC, or by running `tailscale ip -4` on the PC. Then in Moonlight on the Pi, choose **Add PC manually** and enter it. Moonlight recognises it as the same PC, keeps the pairing, and saves it as an extra address. At home it keeps using the local address.
+2. **Turn off key expiry for the Pi and the PC.** Tailscale signs devices out every 180 days by default, and a Pi that boots into Moonlight is awkward to sign back in. In the [Tailscale admin console](https://login.tailscale.com/admin/machines), open the **…** menu next to each of the two machines and choose **Disable key expiry**.
+
+Away from home:
+
+- **Lower the bitrate** to below your home connection's *upload* speed (often 20–40 Mbit/s).
 - Run `tailscale ping <pc-name>`. If replies say **"via DERP"**, the connection is relayed, which adds latency. A direct connection is better.
 - Wake-on-LAN from Moonlight won't work over Tailscale. Leave the PC on, or wake it with something that's always on at home.
 
