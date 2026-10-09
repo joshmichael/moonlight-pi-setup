@@ -13,7 +13,7 @@
 #
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.6.0"
 
 # Change this to your own repository before publishing.
 REPO_URL="https://github.com/joshmichael/moonlight-pi-setup"
@@ -50,6 +50,14 @@ VH_CONFIG="/usr/local/etc/virtualhere/config.ini"
 HANDOFF_HELPER="/usr/local/bin/moonlight-usb-handoff"
 HANDOFF_SERVICE_NAME="moonlight-usb-handoff.service"
 HANDOFF_SERVICE="/etc/systemd/system/${HANDOFF_SERVICE_NAME}"
+MENU_DIR="/usr/local/lib/moonlight-pi-setup/menu"
+MENU_BIN="/usr/local/bin/moonlight-menu"
+MENU_FILES=(moonlight_menu.py ui.py network.py bluetooth.py wifi_setup.py)
+MENU_PACKAGES=(python3-pygame python3-dbus python3-gi python3-qrcode)
+MENU_BASE_URL="https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/menu"
+PHONE_SERVICE_NAME="moonlight-wifi-setup.service"
+PHONE_SERVICE="/etc/systemd/system/${PHONE_SERVICE_NAME}"
+POLKIT_RULE="/etc/polkit-1/rules.d/50-moonlight-pi-setup.rules"
 QUIT_SERVICE_NAME="moonlight-quit-on-shutdown.service"
 QUIT_SERVICE="/etc/systemd/system/${QUIT_SERVICE_NAME}"
 
@@ -72,6 +80,8 @@ OPT_QUIT_ON_SHUTDOWN=0
 OPT_TAILSCALE=0
 OPT_VIRTUALHERE=0
 OPT_USB_HANDOFF=0
+OPT_MENU=0
+WIFI_COUNTRY=""
 OPT_WIFI_POWERSAVE_OFF=0
 NET_IFACE=""
 ON_WIFI=0
@@ -440,6 +450,32 @@ ask_questions() {
     fi
   fi
 
+  # The menu replaces the "Moonlight closed" prompt of the auto-start loop.
+  if (( OPT_AUTOSTART )); then
+    echo "    When Moonlight closes, a menu can appear on the TV for pairing Bluetooth"
+    echo "    controllers, connecting to Wi-Fi (also from your phone) and restarting the Pi."
+    echo "    It works with a controller, a keyboard or a mouse."
+    if ask_yes_no "    Show the controller and Wi-Fi menu? (recommended)" "$(previous_choice menu y)"; then
+      OPT_MENU=1
+    fi
+  fi
+  # Wi-Fi only works once the Pi knows which country's channels it may use.
+  if (( OPT_MENU )) && compgen -G '/sys/class/net/*/wireless' > /dev/null; then
+    local country=""
+    country=$(sudo raspi-config nonint get_wifi_country 2>/dev/null || true)
+    if [[ ! $country =~ ^[A-Z]{2}$ ]]; then
+      while true; do
+        printf '    Which country are you in? Wi-Fi needs this to use the right channels\n'
+        printf '    (two letters, for example GB, US, DE, AU): '
+        read_tty country
+        country=${country^^}
+        [[ $country =~ ^[A-Z]{2}$ ]] && break
+        echo "    Please enter a two-letter country code."
+      done
+      WIFI_COUNTRY=$country
+    fi
+  fi
+
   # When Moonlight runs from the desktop, the desktop's audio server handles
   # the speakers. When it runs on its own, it talks to the HDMI audio directly.
   if (( HAS_AUDIO_SERVER )) && (( ! OPT_AUTOSTART )); then
@@ -541,6 +577,12 @@ ask_questions() {
     info "Boot into:        $( (( OPT_AUTOSTART )) && echo "Moonlight (desktop still installed)" || echo "the desktop")"
   else
     info "Auto-start:       $( (( OPT_AUTOSTART )) && echo yes || echo no)"
+  fi
+  if (( OPT_AUTOSTART )); then
+    info "TV menu:          $( (( OPT_MENU )) && echo "yes (controllers, Wi-Fi, power)" || echo no)"
+  fi
+  if [[ -n $WIFI_COUNTRY ]]; then
+    info "Wi-Fi country:    ${WIFI_COUNTRY}"
   fi
   info "Hide boot text:   $( (( OPT_QUIET_BOOT )) && echo yes || echo no)"
   info "Quit on shutdown: $( (( OPT_QUIT_ON_SHUTDOWN )) && echo yes || echo no)"
@@ -920,7 +962,49 @@ EOF
       # Use the ALSA settings above even if PipeWire (desktop version) is installed.
       echo 'export SDL_AUDIODRIVER=alsa'
     fi
-    if (( OPT_AUTOSTART )); then
+    if (( OPT_AUTOSTART && OPT_MENU )); then
+      cat <<'EOF'
+# Start Moonlight on the TV (tty1 only, so SSH logins are not affected). When it
+# closes, the menu opens (controllers, Wi-Fi, power). At boot the menu opens
+# first if the Pi is offline or has no controller.
+# Menu exit codes: 0 start Moonlight, 10 command line, 20 restarting.
+if [ "$(tty)" = "/dev/tty1" ]; then
+  moonlight-menu --boot 2>> /tmp/moonlight-menu.log
+  rc=$?
+  while true; do
+    case $rc in
+      0)
+        if command -v moonlight_hdmi_card > /dev/null 2>&1; then
+          export MOONLIGHT_HDMI_CARD="$(moonlight_hdmi_card)"
+        fi
+        moonlight-qt > /tmp/moonlight.log 2>&1
+        moonlight-menu 2>> /tmp/moonlight-menu.log
+        rc=$?
+        ;;
+      10)
+        echo "Type 'exit' to go back to Moonlight and the menu."
+        if [ -e /etc/systemd/system/display-manager.service ]; then
+          echo "To open the desktop, type: sudo systemctl start display-manager"
+        fi
+        break
+        ;;
+      20)
+        sleep 60
+        ;;
+      *)
+        echo "The menu couldn't start (see /tmp/moonlight-menu.log)."
+        echo "Press any key within 5 seconds for a command line, or wait to start Moonlight..."
+        if read -r -t 5 -n 1; then
+          echo
+          break
+        fi
+        rc=0
+        ;;
+    esac
+  done
+fi
+EOF
+    elif (( OPT_AUTOSTART )); then
       cat <<'EOF'
 # Start Moonlight on the TV (tty1 only, so SSH logins are not affected)
 if [ "$(tty)" = "/dev/tty1" ]; then
@@ -1269,6 +1353,123 @@ EOF
   info "Steam Big Picture), or press Ctrl+Alt+Shift+Q on a keyboard plugged into the Pi."
 }
 
+# Undo setup_menu.
+remove_menu() {
+  [[ -e $MENU_BIN || -d $MENU_DIR || -f $PHONE_SERVICE || -f $POLKIT_RULE ]] || return 0
+  if [[ -f $PHONE_SERVICE ]]; then
+    sudo systemctl stop "$PHONE_SERVICE_NAME" > /dev/null 2>&1 || true
+    sudo rm -f "$PHONE_SERVICE"
+    sudo systemctl daemon-reload
+  fi
+  sudo nmcli connection delete id moonlight-setup-hotspot > /dev/null 2>&1 || true
+  sudo rm -f /etc/NetworkManager/dnsmasq-shared.d/moonlight-wifi-setup.conf
+  sudo rm -f "$POLKIT_RULE"
+  if [[ -f $MENU_BIN ]] && grep -q "moonlight-pi-setup" "$MENU_BIN"; then
+    sudo rm -f "$MENU_BIN"
+  fi
+  sudo rm -rf "$MENU_DIR"
+  sudo rmdir --ignore-fail-on-non-empty "$(dirname "$MENU_DIR")" 2> /dev/null || true
+  ok "Removed the TV menu"
+}
+
+# The menu that opens on the TV when Moonlight closes: Bluetooth controllers,
+# Wi-Fi (including setup from a phone) and restart/shut down.
+setup_menu() {
+  if (( ! OPT_MENU )); then
+    if [[ -e $MENU_BIN || -d $MENU_DIR ]]; then
+      step "Removing the TV menu"
+      remove_menu
+    fi
+    return 0
+  fi
+  step "Installing the controller and Wi-Fi menu"
+  sudo apt-get install -y "${MENU_PACKAGES[@]}"
+
+  # Use the menu files next to this script (a git checkout), or download them.
+  local src_dir="" tmp f
+  if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} ]]; then
+    src_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/menu"
+  fi
+  tmp=$(mktemp -d)
+  for f in "${MENU_FILES[@]}"; do
+    if [[ -n $src_dir && -f $src_dir/$f ]]; then
+      cp "$src_dir/$f" "$tmp/$f"
+    elif ! curl -fsSL "${MENU_BASE_URL}/${f}" -o "$tmp/$f"; then
+      rm -rf "$tmp"
+      warn "Could not download the menu (${f}), so it was skipped. Re-run this script to try again."
+      OPT_MENU=0
+      return 0
+    fi
+  done
+  sudo install -d -m 755 "$MENU_DIR"
+  sudo install -m 644 "$tmp"/*.py "$MENU_DIR"/
+  rm -rf "$tmp"
+  printf '#!/bin/sh\n# Installed by moonlight-pi-setup.\nexec python3 %s/moonlight_menu.py "$@"\n' "$MENU_DIR" \
+    | sudo tee "$MENU_BIN" > /dev/null
+  sudo chmod 755 "$MENU_BIN"
+
+  # Phone Wi-Fi setup runs as root (it starts a hotspot and a web page) and is
+  # started from the menu when needed.
+  sudo tee "$PHONE_SERVICE" > /dev/null <<EOF
+# Installed by moonlight-pi-setup.
+[Unit]
+Description=Moonlight Pi phone Wi-Fi setup (temporary hotspot and setup page)
+Requires=NetworkManager.service
+After=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 ${MENU_DIR}/wifi_setup.py
+RuntimeDirectory=moonlight-wifi-setup
+RuntimeDirectoryPreserve=yes
+TimeoutStopSec=30
+EOF
+
+  # Let the menu (running as this user on the TV) change Wi-Fi, restart or shut
+  # down, and start or stop phone setup, without asking for a password.
+  sudo tee "$POLKIT_RULE" > /dev/null <<EOF
+// Installed by moonlight-pi-setup. Lets ${USER_NAME} manage Wi-Fi, restart or shut down
+// the Pi, and run phone Wi-Fi setup from the menu on the TV, without a password.
+polkit.addRule(function(action, subject) {
+    if (subject.user != "${USER_NAME}") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    var allowed = [
+        "org.freedesktop.NetworkManager.network-control",
+        "org.freedesktop.NetworkManager.enable-disable-wifi",
+        "org.freedesktop.NetworkManager.wifi.scan",
+        "org.freedesktop.NetworkManager.settings.modify.system",
+        "org.freedesktop.NetworkManager.settings.modify.own",
+        "org.freedesktop.login1.reboot",
+        "org.freedesktop.login1.reboot-multiple-sessions",
+        "org.freedesktop.login1.power-off",
+        "org.freedesktop.login1.power-off-multiple-sessions"
+    ];
+    if (allowed.indexOf(action.id) >= 0) {
+        return polkit.Result.YES;
+    }
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "${PHONE_SERVICE_NAME}" &&
+        ["start", "stop", "restart"].indexOf(action.lookup("verb")) >= 0) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});
+EOF
+  sudo chmod 644 "$POLKIT_RULE"
+  sudo systemctl daemon-reload
+
+  if [[ -n $WIFI_COUNTRY ]]; then
+    if sudo raspi-config nonint do_wifi_country "$WIFI_COUNTRY"; then
+      ok "Wi-Fi country set to ${WIFI_COUNTRY}"
+    else
+      warn "Could not set the Wi-Fi country. Set it later with: sudo raspi-config"
+    fi
+  fi
+  ok "When Moonlight closes, a menu for controllers, Wi-Fi and power will open"
+  info "To get to it from Moonlight's main screen, press B (or Esc) and confirm quitting."
+}
+
 # Keep a copy of this script so --uninstall works even if it was run with curl | bash.
 save_script_copy() {
   local src="${BASH_SOURCE[0]:-}"
@@ -1293,6 +1494,7 @@ finish_install() {
   state_set quit_on_shutdown "$OPT_QUIT_ON_SHUTDOWN"
   state_set wifi_powersave_off "$OPT_WIFI_POWERSAVE_OFF"
   state_set usb_handoff "$OPT_USB_HANDOFF"
+  state_set menu "$OPT_MENU"
 
   step "All done"
   info "Recommended Moonlight settings (in Moonlight's settings screen):"
@@ -1415,6 +1617,9 @@ do_uninstall() {
   # USB hand-off
   remove_usb_handoff
 
+  # TV menu
+  remove_menu
+
   # Optional software
   if package_installed moonlight-qt && ask_yes_no "    Also uninstall Moonlight?" n; then
     sudo apt-get remove -y moonlight-qt
@@ -1512,6 +1717,7 @@ main() {
   setup_audio
   setup_network
   setup_autologin
+  setup_menu
   setup_bash_profile
   setup_quiet_boot
   setup_quit_on_shutdown
