@@ -134,7 +134,8 @@ With this option, the Pi tells every PC it's paired with to quit its running gam
 
 Away from home:
 
-- **Lower the bitrate** to below your home connection's *upload* speed (often 20–40 Mbit/s).
+- **Lower Moonlight's bitrate** (in Moonlight's settings) to below your home connection's *upload* speed, often 20–40 Mbit/s. The 50–100 Mbit/s that works at home will stutter or fail over the internet. Raise it again when you're back home.
+- **VirtualHere won't work away from home.** The VirtualHere client on your PC only finds the Pi on your home network, so a controller plugged into the Pi stays with the Pi and works through Moonlight's own controller support instead (buttons, rumble and usually motion, but not adaptive triggers or HD haptics). That's the better option anyway: VirtualHere over the internet adds input lag and stutter, so don't add the Pi's Tailscale address to VirtualHere.
 - Run `tailscale ping <pc-name>`. If replies say **"via DERP"**, the connection is relayed, which adds latency. A direct connection is better.
 - Wake-on-LAN from Moonlight won't work over Tailscale. Leave the PC on, or wake it with something that's always on at home.
 
@@ -146,7 +147,7 @@ Away from home:
 - In the client, right-click each device that should move to the PC and choose **Auto-Use Device** (the device moves whichever USB port it's in) or **Auto-Use Port** (anything plugged into that port moves). Devices without Auto-Use stay with the Pi. Choosing **Stop using** on a device turns its Auto-Use off, so turn it back on afterwards.
 - The free version shares **one device at a time**. More needs a licence from virtualhere.com.
 - While a device is shared through VirtualHere it belongs to the PC, so Moonlight on the Pi can't see it.
-- Works best at home. Over Tailscale, USB devices may feel laggy.
+- **Home network only.** Away from home (over Tailscale), VirtualHere won't find the Pi, and controllers work through Moonlight instead. See [Tailscale](#tailscale-streaming-away-from-home).
 
 #### Sharing USB devices only while streaming (recommended)
 
