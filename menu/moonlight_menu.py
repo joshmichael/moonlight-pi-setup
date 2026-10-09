@@ -676,7 +676,7 @@ class App:
         """With no controller connected and none paired, pair the first one put in pairing mode."""
         if not self.bt or self.controllers:
             return
-        if not any(d['paired'] and d['gamepad'] for d in self.bt_devices):
+        if not any(d['paired'] and d['bonded'] and d['gamepad'] for d in self.bt_devices):
             self.autopair = True
             self.poll_now()
             self.top.refresh()
@@ -836,13 +836,15 @@ class ControllersScreen(ListScreen):
         paired = [d for d in app.bt_devices if d['paired']]
         paired.sort(key=lambda d: (not d['gamepad'], not d['connected'], d['name'].lower()))
         for d in paired:
-            if d['connected']:
+            if not d['bonded']:
+                detail, color = 'Pair again', WARN
+            elif d['connected']:
                 detail = 'Connected' + (' · %d%%' % d['battery'] if d['battery'] is not None else '')
+                color = GOOD
             else:
-                detail = 'Not connected'
+                detail, color = 'Not connected', None
             items.append(Item(d['name'], lambda d=d: app.push(DeviceScreen(app, d['address'])),
-                              detail=detail, key=d['address'],
-                              detail_color=GOOD if d['connected'] else None))
+                              detail=detail, key=d['address'], detail_color=color))
         self.list.set_items(items)
 
     def draw_panel(self, surf, rect):
@@ -866,6 +868,10 @@ class ControllersScreen(ListScreen):
 class PairScreen(ListScreen):
     title = 'Pair a controller'
 
+    def __init__(self, app):
+        super().__init__(app)
+        self.auto_tried = False
+
     def enter(self):
         app = self.app
         app.autopair_paused = True
@@ -885,12 +891,20 @@ class PairScreen(ListScreen):
 
     def refresh(self):
         app = self.app
-        found = [d for d in app.bt_devices if d['gamepad'] and not d['paired'] and d['rssi'] is not None]
+        found = [d for d in app.bt_devices
+                 if d['gamepad'] and (not d['paired'] or not d['bonded']) and d['rssi'] is not None]
         if not found:
             self.list.set_items([Item('Looking for controllers…', selectable=False, spinner=True)])
             return
         self.list.set_items([Item(d['name'], lambda d=d: self._pair(d), key=d['address'],
                                   detail='Ready to pair') for d in found])
+        # With no controller connected there's nothing to select it with (for
+        # example, the controller being paired was just unplugged), so pair the
+        # first one found.
+        if not app.controllers and not app.busy and not app.dialog and not self.auto_tried:
+            self.auto_tried = True
+            d = found[0]
+            app.call_soon(lambda: self._pair(d) if app.top is self else None)
 
     def _pair(self, d):
         app = self.app
@@ -905,8 +919,7 @@ class PairScreen(ListScreen):
         app.run_task(lambda: app.bt.pair(d['address']), done, busy='Pairing with %s…' % d['name'])
 
     def draw_panel(self, surf, rect):
-        y = draw_wrapped(surf, 'Put your controller in pairing mode', (rect.x, rect.y), rect.width, 32, TEXT,
-                         bold=True) + 16
+        y = draw_wrapped(surf, 'Put it in pairing mode', (rect.x, rect.y), rect.width, 32, TEXT, bold=True) + 16
         for head, body in (
                 ('PlayStation (DualSense, DualShock 4)',
                  'Hold Create (Share) and the PS button until the light flashes.'),
@@ -916,8 +929,8 @@ class PairScreen(ListScreen):
                 ('Others', "See the controller's manual for its Bluetooth pairing mode.")):
             y = draw_text(surf, head, (rect.x, y), 28, ACCENT, bold=True).bottom + 6
             y = draw_wrapped(surf, body, (rect.x, y), rect.width, 28) + 18
-        draw_wrapped(surf, 'It appears in the list within a few seconds. Then select it.',
-                     (rect.x, y + 6), rect.width, 28, FAINT)
+        draw_wrapped(surf, 'Select it when it appears. With no other controller connected, it pairs by '
+                     'itself.', (rect.x, y + 6), rect.width, 28, FAINT)
 
 
 class DeviceScreen(ListScreen):
@@ -939,7 +952,9 @@ class DeviceScreen(ListScreen):
             return
         self.title = d['name']
         items = []
-        if d['connected']:
+        if not d['bonded']:
+            items.append(Item('Pair again', self._repair, key='repair', color=WARN))
+        elif d['connected']:
             items.append(Item('Disconnect', self._disconnect, key='conn'))
         else:
             items.append(Item('Connect', self._connect, key='conn'))
@@ -969,6 +984,19 @@ class DeviceScreen(ListScreen):
     def _disconnect(self):
         self._run(lambda: self.app.bt.disconnect(self.address), 'Disconnecting…', None)
 
+    def _repair(self):
+        """Forget the broken pairing, then go straight to pairing."""
+        app = self.app
+
+        def done(res, err):
+            if err:
+                app.message('Something went wrong', str(err))
+                return
+            app.pop()
+            app.push(PairScreen(app))
+            app.poll_now()
+        app.run_task(lambda: app.bt.forget(self.address), done, 'Removing the old pairing…')
+
     def _forget(self):
         d = self.device()
         self.app.confirm('Forget %s?' % d['name'], 'You will need to pair it again to use it over Bluetooth.',
@@ -981,6 +1009,10 @@ class DeviceScreen(ListScreen):
         if not d:
             return
         y = rect.y
+        if not d['bonded']:
+            draw_wrapped(surf, "The Pi didn't save this controller's pairing, so it can't reconnect. Choose "
+                         'Pair again, then put the controller in pairing mode.', (rect.x, y), rect.width, 30, WARN)
+            return
         for label, value, color in (
                 ('Status', 'Connected' if d['connected'] else 'Not connected', GOOD if d['connected'] else DIM),
                 ('Battery', '%d%%' % d['battery'] if d['battery'] is not None else 'Unknown', TEXT),

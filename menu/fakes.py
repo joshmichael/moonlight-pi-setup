@@ -7,7 +7,7 @@ import os
 import time
 
 from network import NetworkError, key_mgmt_for, validate_password
-from bluetooth import BluetoothError
+from bluetooth import BluetoothError, needs_pairing
 
 
 class FakeNetwork:
@@ -91,14 +91,16 @@ class FakeBluetooth:
         self.discovering = False
         self.devs = [
             {'address': 'AA:BB:CC:00:00:01', 'name': 'DualSense Wireless Controller', 'icon': 'input-gaming',
-             'class': 0x2508, 'paired': True, 'trusted': True, 'connected': True, 'rssi': None, 'battery': 70,
+             'class': 0x2508, 'paired': True, 'bonded': True, 'trusted': True, 'connected': True, 'rssi': None, 'battery': 70,
              'gamepad': True, 'path': None},
             {'address': 'AA:BB:CC:00:00:02', 'name': 'Xbox Wireless Controller', 'icon': 'input-gaming',
-             'class': 0x2508, 'paired': True, 'trusted': True, 'connected': False, 'rssi': None, 'battery': None,
+             'class': 0x2508, 'paired': True, 'bonded': True, 'trusted': True, 'connected': False, 'rssi': None, 'battery': None,
              'gamepad': True, 'path': None},
         ]
         if os.environ.get('FAKE_NO_PAIRED'):
             self.devs = []
+        if os.environ.get('FAKE_UNBONDED'):
+            self.devs[0].update(bonded=False, connected=False, battery=None)
         self.started = None
 
     def available(self):
@@ -108,7 +110,7 @@ class FakeBluetooth:
         devs = [dict(d) for d in self.devs]
         if self.discovering and self.started and time.monotonic() - self.started > 2:
             devs.append({'address': 'AA:BB:CC:00:00:09', 'name': 'Wireless Controller', 'icon': 'input-gaming',
-                         'class': 0x2508, 'paired': False, 'trusted': False, 'connected': False, 'rssi': -52,
+                         'class': 0x2508, 'paired': False, 'bonded': False, 'trusted': False, 'connected': False, 'rssi': -52,
                          'battery': None, 'gamepad': True, 'path': None})
         return devs
 
@@ -120,13 +122,13 @@ class FakeBluetooth:
         self.discovering = False
 
     def pairable_gamepads(self):
-        return [d for d in self.devices() if d['gamepad'] and not d['paired'] and d['rssi'] is not None]
+        return [d for d in self.devices() if needs_pairing(d) and d['rssi'] is not None]
 
     def pair(self, address):
         time.sleep(2)
         self.discovering = False
         self.devs.append({'address': address, 'name': 'Wireless Controller', 'icon': 'input-gaming',
-                          'class': 0x2508, 'paired': True, 'trusted': True, 'connected': True, 'rssi': None,
+                          'class': 0x2508, 'paired': True, 'bonded': True, 'trusted': True, 'connected': True, 'rssi': None,
                           'battery': 45, 'gamepad': True, 'path': None})
 
     def _find(self, address):

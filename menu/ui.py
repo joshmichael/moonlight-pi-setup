@@ -294,7 +294,7 @@ class ListView:
                 rrect(surf, ACCENT, r, 18)
             elif it.selectable:
                 rrect(surf, PANEL, r, 18)
-            label_color = it.color or (WHITE if selected else (TEXT if it.selectable else DIM))
+            label_color = WHITE if selected else (it.color or (TEXT if it.selectable else DIM))
             right = r.right - 28
             if it.signal is not None:
                 right -= signal_bars(surf, right - 48, r.centery - 8, it.signal,

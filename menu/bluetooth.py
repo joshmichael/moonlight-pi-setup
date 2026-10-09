@@ -32,6 +32,11 @@ def is_gamepad(dev):
     return dev.get('icon') in (None, '', 'input-gaming') and any(w in name for w in GAMEPAD_WORDS)
 
 
+def needs_pairing(dev):
+    """A controller that isn't paired, or is paired without a saved key."""
+    return dev['gamepad'] and (not dev['paired'] or not dev.get('bonded', True))
+
+
 def battery_from_sysfs(address):
     """Battery level some kernel drivers (e.g. DualSense) report, or None."""
     mac = address.lower()
@@ -70,7 +75,10 @@ def paired_gamepad_count():
         n = 0
         for _, ifaces in om.GetManagedObjects().items():
             d = ifaces.get(DEVICE)
-            if d and d.get('Paired') and is_gamepad(_device_dict(d)):
+            if not d:
+                continue
+            dev = _device_dict(d)
+            if dev['paired'] and dev['bonded'] and is_gamepad(dev):
                 n += 1
         return n
     except Exception as e:
@@ -86,6 +94,9 @@ def _device_dict(d, path=None):
         'icon': str(d.get('Icon', '')),
         'class': int(d.get('Class', 0)),
         'paired': bool(d.get('Paired', False)),
+        # Paired without a stored key: BlueZ refuses its controller connections
+        # ("Rejected connection from !bonded device"). Older BlueZ has no Bonded.
+        'bonded': bool(d.get('Bonded', d.get('Paired', False))),
         'trusted': bool(d.get('Trusted', False)),
         'connected': bool(d.get('Connected', False)),
         'rssi': int(d['RSSI']) if 'RSSI' in d else None,
@@ -212,11 +223,19 @@ class Bluetooth:
             result.append(dev)
         return result
 
+    def _set_pairable(self, on):
+        """The adapter must be pairable (bondable) while pairing, or the kernel
+        pairs without bonding: no link key is saved, and the controller can't
+        reconnect afterwards."""
+        try:
+            self._props(self._adapter_path()).Set(ADAPTER, 'Pairable', bool(on))
+        except Exception as e:
+            log.info('set pairable %s: %s', on, e)
+
     def start_discovery(self):
         with self.lock:
             path = self.ensure_powered()
-            props = self._props(path)
-            props.Set(ADAPTER, 'Pairable', True)
+            self._set_pairable(True)
             adapter = self.dbus.Interface(self.bus.get_object(BLUEZ, path), ADAPTER)
             try:
                 adapter.SetDiscoveryFilter({'Transport': 'auto'})
@@ -229,48 +248,95 @@ class Bluetooth:
                     raise BluetoothError(friendly_error(e))
             self.discovering = True
 
-    def stop_discovery(self):
+    def stop_discovery(self, keep_pairable=False):
         with self.lock:
-            if not self.discovering:
-                return
-            self.discovering = False
-            try:
-                path = self._adapter_path()
-                adapter = self.dbus.Interface(self.bus.get_object(BLUEZ, path), ADAPTER)
-                adapter.StopDiscovery()
-                self._props(path).Set(ADAPTER, 'Pairable', False)
-            except Exception as e:
-                log.info('stop discovery: %s', e)
+            if self.discovering:
+                self.discovering = False
+                try:
+                    path = self._adapter_path()
+                    adapter = self.dbus.Interface(self.bus.get_object(BLUEZ, path), ADAPTER)
+                    adapter.StopDiscovery()
+                except Exception as e:
+                    log.info('stop discovery: %s', e)
+            if not keep_pairable:
+                self._set_pairable(False)
 
     def pairable_gamepads(self):
-        """Controllers in pairing mode right now (seen during discovery, not yet paired)."""
-        return [d for d in self.devices() if d['gamepad'] and not d['paired'] and d['rssi'] is not None]
+        """Controllers in pairing mode right now (seen during discovery and not
+        properly paired yet)."""
+        return [d for d in self.devices() if needs_pairing(d) and d['rssi'] is not None]
+
+    def _rediscover(self, address, seconds=20):
+        """Searches until the controller shows up again; returns its object path."""
+        import time
+        path = self._adapter_path()
+        adapter = self.dbus.Interface(self.bus.get_object(BLUEZ, path), ADAPTER)
+        try:
+            adapter.StartDiscovery()
+        except self.dbus.exceptions.DBusException:
+            pass
+        try:
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                for p, ifaces in self._objects().items():
+                    d = ifaces.get(DEVICE)
+                    if d and str(d.get('Address', '')).upper() == address.upper() and 'RSSI' in d:
+                        return p
+                time.sleep(0.5)
+        finally:
+            try:
+                adapter.StopDiscovery()
+            except self.dbus.exceptions.DBusException:
+                pass
+        raise BluetoothError('The controller left pairing mode. Put it back in pairing mode and try again.')
 
     def pair(self, address):
         """Pairs, trusts (so it reconnects by itself) and connects a controller."""
         dbus = self.dbus
         was_discovering = self.discovering
-        self.stop_discovery()
-        path = self._path_for(address)
-        dev = self._device(path)
+        # Stop searching (pairing is more reliable without it), but stay pairable.
+        self.stop_discovery(keep_pairable=True)
+        self._set_pairable(True)
         try:
-            dev.Pair(timeout=60)
-        except dbus.exceptions.DBusException as e:
-            if not e.get_dbus_name().endswith('AlreadyExists'):
-                try:
-                    if not self._props(path).Get(DEVICE, 'Paired'):
-                        self._remove(path)
-                except dbus.exceptions.DBusException:
-                    pass
-                if was_discovering:
-                    self.start_discovery()
-                raise BluetoothError(friendly_error(e))
-        self._props(path).Set(DEVICE, 'Trusted', True)
+            path = self._path_for(address)
+            props = self._props(path)
+            if props.Get(DEVICE, 'Paired') and not self._is_bonded(props):
+                # An earlier pairing without a saved key: remove it and pair from scratch.
+                self._remove(path)
+                path = self._rediscover(address)
+                props = self._props(path)
+            dev = self._device(path)
+            try:
+                dev.Pair(timeout=60)
+            except dbus.exceptions.DBusException as e:
+                if not e.get_dbus_name().endswith('AlreadyExists'):
+                    try:
+                        if not props.Get(DEVICE, 'Paired'):
+                            self._remove(path)
+                    except dbus.exceptions.DBusException:
+                        pass
+                    if was_discovering:
+                        self.start_discovery()
+                    raise BluetoothError(friendly_error(e))
+            if not self._is_bonded(props):
+                self._remove(path)
+                raise BluetoothError("It paired, but the Pi couldn't save the pairing, so it wouldn't reconnect "
+                                     "later. Put it back in pairing mode and try again.")
+            props.Set(DEVICE, 'Trusted', True)
+            try:
+                dev.Connect(timeout=30)
+            except dbus.exceptions.DBusException as e:
+                if not props.Get(DEVICE, 'Connected'):
+                    raise BluetoothError('Paired, but it didn\'t connect: ' + friendly_error(e))
+        finally:
+            if not self.discovering:
+                self._set_pairable(False)
+
+    def _is_bonded(self, props):
         try:
-            dev.Connect(timeout=30)
-        except dbus.exceptions.DBusException as e:
-            if not self._props(path).Get(DEVICE, 'Connected'):
-                raise BluetoothError('Paired, but it didn\'t connect: ' + friendly_error(e))
+            return bool(props.Get(DEVICE, 'Bonded'))
+        except self.dbus.exceptions.DBusException:
+            return True     # BlueZ older than 5.73 has no Bonded property
 
     def connect(self, address):
         path = self._path_for(address)
