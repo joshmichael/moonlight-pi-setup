@@ -19,6 +19,7 @@ SCRIPT_VERSION="1.5.0"
 REPO_URL="https://github.com/joshmichael/moonlight-pi-setup"
 ISSUES_URL="${REPO_URL}/issues"
 RAW_SCRIPT_URL="https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/moonlight-pi-setup.sh"
+PC_SCRIPT_URL="https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/windows/moonlight-pc-setup.ps1"
 
 # ---------------------------------------------------------------------------
 # Paths and constants
@@ -1263,10 +1264,6 @@ EOF
   sudo systemctl enable "$HANDOFF_SERVICE_NAME" > /dev/null 2>&1
   sudo systemctl restart "$HANDOFF_SERVICE_NAME"
   ok "USB devices plugged into the Pi will move to your PC only while you're streaming"
-  info "On your PC: keep the VirtualHere client running (set it to start with Windows),"
-  info "and turn on Auto-Use for each device that should move (right-click it in the client)."
-  info "So the controller reaches the PC within seconds, close the client, set"
-  info "AutoRefreshLookupPeriod=5 in %APPDATA%\\vhui.ini, and start it again."
   info "During a stream the controller is on the PC, so Moonlight's controller shortcut"
   info "can't end the stream. Quit the game or app on the PC instead (for example, exit"
   info "Steam Big Picture), or press Ctrl+Alt+Shift+Q on a keyboard plugged into the Pi."
@@ -1317,13 +1314,23 @@ finish_install() {
     echo
   fi
   info "On your gaming PC you need a streaming host: Sunshine, Apollo or Vibepollo."
-  if (( OPT_TAILSCALE )); then
-    info "Tailscale: install it on your gaming PC too. Away from home, add the PC in"
-    info "Moonlight using its Tailscale address (100.x.x.x) and lower the bitrate."
+  if (( OPT_VIRTUALHERE || OPT_TAILSCALE )) || virtualhere_installed || command -v tailscale > /dev/null 2>&1; then
+    echo
+    info "Then set up the PC to match: open PowerShell on the gaming PC and paste:"
+    info "  irm ${PC_SCRIPT_URL} | iex"
+    info "It sets up the VirtualHere client (downloads it, starts it with Windows, and"
+    info "makes it find the Pi quickly) and can install Tailscale."
   fi
-  if (( OPT_VIRTUALHERE )); then
-    info "VirtualHere: install the VirtualHere client on your PC from"
-    info "https://www.virtualhere.com/usb_client_software"
+  if (( OPT_TAILSCALE )); then
+    info "Tailscale: away from home, add the PC in Moonlight using its Tailscale"
+    info "address (100.x.x.x) and lower the bitrate."
+  fi
+  if (( OPT_VIRTUALHERE )) || virtualhere_installed; then
+    info "VirtualHere: in the client on your PC, right-click each device that should move"
+    info "to the PC and choose Auto-Use Device or Auto-Use Port."
+    if (( OPT_USB_HANDOFF )); then
+      info "The Pi's devices only appear there while you're streaming, so start a stream first."
+    fi
   fi
   echo
   info "Moonlight log (after reboot): /tmp/moonlight.log"

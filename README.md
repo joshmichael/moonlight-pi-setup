@@ -125,7 +125,7 @@ With this option, the Pi tells every PC it's paired with to quit its running gam
 
 [Tailscale](https://tailscale.com) connects the Pi and your PC over the internet without opening ports on your router.
 
-- Install Tailscale on your **gaming PC** too, signed in to the same account.
+- Install Tailscale on your **gaming PC** too, signed in to the same account. The [PC setup script](#setting-up-the-gaming-pc) can do this.
 - At home, keep connecting to the PC's normal local address, so streaming doesn't go through Tailscale at all.
 - Away from home, add the PC in Moonlight using its Tailscale address (`100.x.x.x`) and **lower the bitrate** to below your home connection's *upload* speed (often 20–40 Mbit/s).
 - Run `tailscale ping <pc-name>`. If replies say **"via DERP"**, the connection is relayed, which adds latency. A direct connection is better.
@@ -135,7 +135,8 @@ With this option, the Pi tells every PC it's paired with to quit its running gam
 
 [VirtualHere](https://www.virtualhere.com) makes USB devices plugged into the Pi appear on your PC as if they were plugged in directly. A wired DualSense, for example, keeps its native haptics and adaptive triggers.
 
-- Install the **VirtualHere client** on your PC: https://www.virtualhere.com/usb_client_software
+- Set up the **VirtualHere client** on your PC with the [PC setup script](#setting-up-the-gaming-pc), or by hand from https://www.virtualhere.com/usb_client_software
+- In the client, right-click each device that should move to the PC and choose **Auto-Use Device** (the device moves whichever USB port it's in) or **Auto-Use Port** (anything plugged into that port moves). Devices without Auto-Use stay with the Pi. Choosing **Stop using** on a device turns its Auto-Use off, so turn it back on afterwards.
 - The free version shares **one device at a time**. More needs a licence from virtualhere.com.
 - While a device is shared through VirtualHere it belongs to the PC, so Moonlight on the Pi can't see it.
 - Works best at home. Over Tailscale, USB devices may feel laggy.
@@ -144,18 +145,29 @@ With this option, the Pi tells every PC it's paired with to quit its running gam
 
 With this option, a controller plugged into the Pi works in Moonlight's menus between streams, and moves to your PC (with full haptics and adaptive triggers on a DualSense) while you're streaming. The Pi watches Moonlight's log: when a stream starts it switches the VirtualHere server on, and when the stream ends (quit or disconnect) it switches it off, which gives the devices back to the Pi.
 
-Set up the PC once:
-
-1. Keep the VirtualHere client running all the time. Add it to Windows startup (for example, put a shortcut to `vhui64.exe` in the folder that opens when you type `shell:startup` in the Run box).
-2. In the client, right-click each device that should move to the PC and turn on **Auto-Use**. Devices without Auto-Use (such as the Pi's keyboard receiver) stay with the Pi. Choosing **Stop using** on a device turns its Auto-Use off, so turn it back on afterwards.
-3. Make the client look for the Pi more often. By default it checks every 30 seconds, so the controller can take up to half a minute to reach the PC. Close the client (from its tray icon), open `%APPDATA%\vhui.ini` in Notepad, change `AutoRefreshLookupPeriod=30` to `AutoRefreshLookupPeriod=5`, save, and start the client again.
+On the PC, run the [PC setup script](#setting-up-the-gaming-pc), which keeps the VirtualHere client running and makes it find the Pi quickly. Then start a stream (the Pi's devices only appear in the client while you're streaming) and turn on Auto-Use for the devices that should move, as above.
 
 Then:
 
-- When a stream starts, the controller takes a few seconds to appear on the PC (2–8 seconds in testing with the setting above). When the stream ends, it's back on the Pi within about 2 seconds.
+- When a stream starts, the controller takes a few seconds to appear on the PC (2–8 seconds in testing). When the stream ends, it's back on the Pi within about 2 seconds.
 - **To end a stream, quit the game or app on the PC** (for example, exit Steam Big Picture), or press Ctrl+Alt+Shift+Q on a keyboard plugged into the Pi. The controller is on the PC during a stream, so Moonlight's controller shortcut (Select+Start+L1+R1) can't reach the Pi.
 - It needs Moonlight to start automatically, because it reads the log that the auto-start writes.
 - To see what it's doing: `journalctl -u moonlight-usb-handoff --no-pager`
+
+## Setting up the gaming PC
+
+If you use VirtualHere or Tailscale, run this in **PowerShell** on your Windows gaming PC, as your normal user (not as administrator):
+
+```powershell
+irm https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/windows/moonlight-pc-setup.ps1 | iex
+```
+
+It:
+
+- **VirtualHere:** uses the client you already have, or downloads the official one (and checks it's signed by VirtualHere). It makes the client start with Windows, and makes it look for the Pi every 5 seconds instead of every 30, so USB devices reach the PC within seconds of a stream starting. The first time the client runs, it asks for permission to install its USB driver: say Yes.
+- **Tailscale:** asks whether to install it, if it isn't installed already.
+
+It's safe to run again, and only changes what isn't set up yet. It doesn't choose which USB devices move: you do that in the VirtualHere client (see [VirtualHere](#virtualhere-sharing-usb-devices-with-your-pc)).
 
 ## Troubleshooting
 
