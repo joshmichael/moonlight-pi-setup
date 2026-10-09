@@ -13,12 +13,13 @@
 #
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.5.0"
 
 # Change this to your own repository before publishing.
 REPO_URL="https://github.com/joshmichael/moonlight-pi-setup"
 ISSUES_URL="${REPO_URL}/issues"
 RAW_SCRIPT_URL="https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/moonlight-pi-setup.sh"
+PC_SCRIPT_URL="https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/windows/moonlight-pc-setup.ps1"
 
 # ---------------------------------------------------------------------------
 # Paths and constants
@@ -44,6 +45,11 @@ TAILSCALE_INSTALL_SCRIPT="https://tailscale.com/install.sh"
 VH_INSTALL_SCRIPT="https://raw.githubusercontent.com/virtualhere/script/main/install_server"
 VH_UNINSTALL_SCRIPT="https://raw.githubusercontent.com/virtualhere/script/main/uninstall_server"
 QUIT_HELPER="/usr/local/bin/moonlight-quit-all"
+VH_SERVICE_NAME="virtualhere.service"
+VH_CONFIG="/usr/local/etc/virtualhere/config.ini"
+HANDOFF_HELPER="/usr/local/bin/moonlight-usb-handoff"
+HANDOFF_SERVICE_NAME="moonlight-usb-handoff.service"
+HANDOFF_SERVICE="/etc/systemd/system/${HANDOFF_SERVICE_NAME}"
 QUIT_SERVICE_NAME="moonlight-quit-on-shutdown.service"
 QUIT_SERVICE="/etc/systemd/system/${QUIT_SERVICE_NAME}"
 
@@ -65,6 +71,7 @@ OPT_QUIET_BOOT=0
 OPT_QUIT_ON_SHUTDOWN=0
 OPT_TAILSCALE=0
 OPT_VIRTUALHERE=0
+OPT_USB_HANDOFF=0
 OPT_WIFI_POWERSAVE_OFF=0
 NET_IFACE=""
 ON_WIFI=0
@@ -506,6 +513,23 @@ ask_questions() {
     OPT_VIRTUALHERE=1
   fi
 
+  # USB hand-off watches the Moonlight log written by the auto-start loop, so it
+  # needs auto-start.
+  if (( OPT_VIRTUALHERE )) || virtualhere_installed; then
+    if (( OPT_AUTOSTART )); then
+      echo "    VirtualHere can share USB devices only while you're streaming. Then a"
+      echo "    controller plugged into the Pi works in Moonlight's menus between streams,"
+      echo "    and moves to your PC (with full haptics) while you're streaming."
+      if ask_yes_no "    Share USB devices with your PC only while streaming? (recommended)" \
+          "$(previous_choice usb_handoff y)"; then
+        OPT_USB_HANDOFF=1
+      fi
+    else
+      info "VirtualHere will share USB devices all the time. Sharing them only while"
+      info "streaming needs Moonlight to start automatically."
+    fi
+  fi
+
   step "Summary"
   info "Moonlight:        install the official moonlight-qt package"
   case "$AUDIO_MODE" in
@@ -532,6 +556,9 @@ ask_questions() {
     info "VirtualHere:      already installed"
   else
     info "VirtualHere:      $( (( OPT_VIRTUALHERE )) && echo yes || echo no)"
+  fi
+  if (( OPT_VIRTUALHERE )) || virtualhere_installed; then
+    info "Share USB:        $( (( OPT_USB_HANDOFF )) && echo "only while streaming" || echo "all the time")"
   fi
   echo
   ask_yes_no "    Go ahead with these settings?" y || die "Cancelled. Nothing was changed."
@@ -1111,6 +1138,137 @@ install_virtualhere() {
   fi
 }
 
+# Undo setup_usb_handoff: VirtualHere goes back to sharing devices all the time.
+remove_usb_handoff() {
+  [[ -f $HANDOFF_SERVICE || -f $HANDOFF_HELPER ]] || return 0
+  if [[ -f $HANDOFF_SERVICE ]]; then
+    sudo systemctl disable --now "$HANDOFF_SERVICE_NAME" > /dev/null 2>&1 || true
+    sudo rm -f "$HANDOFF_SERVICE"
+    sudo systemctl daemon-reload
+  fi
+  if [[ -f $HANDOFF_HELPER ]] && grep -q "moonlight-pi-setup" "$HANDOFF_HELPER"; then
+    sudo rm -f "$HANDOFF_HELPER"
+  fi
+  if [[ $(state_get vh_disabled_by_handoff) == 1 ]]; then
+    sudo systemctl enable --now "$VH_SERVICE_NAME" > /dev/null 2>&1 || true
+    state_set vh_disabled_by_handoff 0
+  fi
+  ok "VirtualHere shares USB devices all the time again"
+}
+
+# Share USB devices with the PC only while streaming. A watcher starts the
+# VirtualHere server when a stream starts and stops it when the stream ends,
+# which hands the devices back to the Pi.
+setup_usb_handoff() {
+  virtualhere_installed || return 0
+  # The VirtualHere installer leaves its config writable by every user, but the
+  # server runs as root.
+  if [[ -f $VH_CONFIG ]]; then
+    sudo chmod 644 "$VH_CONFIG"
+  fi
+
+  if (( ! OPT_USB_HANDOFF )); then
+    if [[ -f $HANDOFF_SERVICE ]]; then
+      step "Sharing USB devices with your PC all the time again"
+      remove_usb_handoff
+    fi
+    return 0
+  fi
+
+  step "Sharing USB devices with your PC only while streaming"
+  if ! systemctl cat "$VH_SERVICE_NAME" > /dev/null 2>&1; then
+    warn "The VirtualHere service (${VH_SERVICE_NAME}) wasn't found. Skipping."
+    return 0
+  fi
+
+  sudo tee "$HANDOFF_HELPER" > /dev/null <<'EOF'
+#!/usr/bin/env bash
+# Installed by moonlight-pi-setup.
+# Shares USB devices with the gaming PC only while Moonlight is streaming.
+# Watches the Moonlight log, starts the VirtualHere server when a stream
+# starts, and stops it when the stream ends, which gives the devices back to
+# the Pi. A controller plugged into the Pi then works in Moonlight's menus
+# between streams, and on the PC (through the VirtualHere client's Auto-Use)
+# during a stream.
+LOG=/tmp/moonlight.log
+VH=virtualhere.service
+streaming=0
+
+start_sharing() {
+  streaming=1
+  echo "Stream started: sharing USB devices with the PC"
+  systemctl start "$VH"
+}
+
+stop_sharing() {
+  streaming=0
+  echo "Stream ended ($1): giving USB devices back to the Pi"
+  systemctl stop "$VH"
+}
+
+# Pick up where things are, in case this service restarted mid-stream.
+last=$(grep -aE 'Starting video stream|Stopping video stream' "$LOG" 2>/dev/null | tail -n 1)
+if [[ $last == *"Starting video stream"* ]] && pgrep -x moonlight-qt > /dev/null; then
+  start_sharing
+else
+  systemctl stop "$VH"
+  echo "Waiting for a stream to start"
+fi
+
+# tail -F keeps following the log when Moonlight restarts and rewrites it.
+while true; do
+  IFS= read -r -t 5 line
+  rc=$?
+  if (( rc == 0 )); then
+    case $line in
+      *"Starting video stream"*)
+        (( streaming )) || start_sharing ;;
+      *"Stopping video stream"*)
+        if (( streaming )); then stop_sharing "stream closed"; fi ;;
+      *"file truncated"*|*"has been replaced"*)
+        if (( streaming )); then stop_sharing "Moonlight restarted"; fi ;;
+    esac
+  elif (( rc > 128 )); then
+    # No new log lines for 5 seconds: check Moonlight hasn't closed mid-stream.
+    if (( streaming )) && ! pgrep -x moonlight-qt > /dev/null; then
+      stop_sharing "Moonlight closed"
+    fi
+  else
+    exit 1   # tail stopped; systemd restarts this service
+  fi
+done < <(tail -n 0 -F "$LOG" 2>&1)
+EOF
+  sudo chmod 755 "$HANDOFF_HELPER"
+
+  sudo tee "$HANDOFF_SERVICE" > /dev/null <<EOF
+# Installed by moonlight-pi-setup.
+[Unit]
+Description=Share USB devices with the gaming PC only while Moonlight is streaming
+After=${VH_SERVICE_NAME}
+
+[Service]
+ExecStart=${HANDOFF_HELPER}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  # From now on the hand-off service decides when the VirtualHere server runs.
+  if systemctl is-enabled --quiet "$VH_SERVICE_NAME" 2>/dev/null; then
+    sudo systemctl disable "$VH_SERVICE_NAME" > /dev/null 2>&1
+    state_set vh_disabled_by_handoff 1
+  fi
+  sudo systemctl daemon-reload
+  sudo systemctl enable "$HANDOFF_SERVICE_NAME" > /dev/null 2>&1
+  sudo systemctl restart "$HANDOFF_SERVICE_NAME"
+  ok "USB devices plugged into the Pi will move to your PC only while you're streaming"
+  info "During a stream the controller is on the PC, so Moonlight's controller shortcut"
+  info "can't end the stream. Quit the game or app on the PC instead (for example, exit"
+  info "Steam Big Picture), or press Ctrl+Alt+Shift+Q on a keyboard plugged into the Pi."
+}
+
 # Keep a copy of this script so --uninstall works even if it was run with curl | bash.
 save_script_copy() {
   local src="${BASH_SOURCE[0]:-}"
@@ -1134,6 +1292,7 @@ finish_install() {
   state_set quiet_boot "$OPT_QUIET_BOOT"
   state_set quit_on_shutdown "$OPT_QUIT_ON_SHUTDOWN"
   state_set wifi_powersave_off "$OPT_WIFI_POWERSAVE_OFF"
+  state_set usb_handoff "$OPT_USB_HANDOFF"
 
   step "All done"
   info "Recommended Moonlight settings (in Moonlight's settings screen):"
@@ -1155,13 +1314,23 @@ finish_install() {
     echo
   fi
   info "On your gaming PC you need a streaming host: Sunshine, Apollo or Vibepollo."
-  if (( OPT_TAILSCALE )); then
-    info "Tailscale: install it on your gaming PC too. Away from home, add the PC in"
-    info "Moonlight using its Tailscale address (100.x.x.x) and lower the bitrate."
+  if (( OPT_VIRTUALHERE || OPT_TAILSCALE )) || virtualhere_installed || command -v tailscale > /dev/null 2>&1; then
+    echo
+    info "Then set up the PC to match: open PowerShell on the gaming PC and paste:"
+    info "  irm ${PC_SCRIPT_URL} | iex"
+    info "It sets up the VirtualHere client (downloads it, starts it with Windows, and"
+    info "makes it find the Pi quickly) and can install Tailscale."
   fi
-  if (( OPT_VIRTUALHERE )); then
-    info "VirtualHere: install the VirtualHere client on your PC from"
-    info "https://www.virtualhere.com/usb_client_software"
+  if (( OPT_TAILSCALE )); then
+    info "Tailscale: away from home, add the PC in Moonlight using its Tailscale"
+    info "address (100.x.x.x) and lower the bitrate."
+  fi
+  if (( OPT_VIRTUALHERE )) || virtualhere_installed; then
+    info "VirtualHere: in the client on your PC, right-click each device that should move"
+    info "to the PC and choose Auto-Use Device or Auto-Use Port."
+    if (( OPT_USB_HANDOFF )); then
+      info "The Pi's devices only appear there while you're streaming, so start a stream first."
+    fi
   fi
   echo
   info "Moonlight log (after reboot): /tmp/moonlight.log"
@@ -1242,6 +1411,9 @@ do_uninstall() {
 
   # Quit on shutdown
   remove_quit_on_shutdown
+
+  # USB hand-off
+  remove_usb_handoff
 
   # Optional software
   if package_installed moonlight-qt && ask_yes_no "    Also uninstall Moonlight?" n; then
@@ -1345,6 +1517,7 @@ main() {
   setup_quit_on_shutdown
   install_tailscale
   install_virtualhere
+  setup_usb_handoff
   finish_install
 }
 
