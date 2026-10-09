@@ -44,6 +44,7 @@ Have the TV (and receiver, if you use one) switched on while the script runs, so
 | **Wi-Fi only:** Turn off Wi-Fi power saving (recommended on Wi-Fi) | Yes |
 | Install Tailscale (not asked if it's already installed) | No |
 | Install VirtualHere (not asked if it's already installed) | No |
+| **With VirtualHere and auto-start:** Share USB devices with your PC only while streaming (recommended) | Yes |
 
 You'll see a summary before anything is changed. At the end, the script offers to reboot.
 
@@ -64,6 +65,7 @@ When you re-run the script, the defaults are the answers you gave last time, so 
 | Optional: installs `/usr/local/bin/moonlight-quit-all` and the `moonlight-quit-on-shutdown` service | Ends the game on your PC when the Pi is switched off (see below) |
 | Optional, on Wi-Fi: writes `/etc/NetworkManager/conf.d/90-moonlight-pi-setup-wifi.conf` (`wifi.powersave = 2`) | Wi-Fi power saving makes the Pi's Wi-Fi doze between packets, which causes stutter and lag spikes |
 | Optional: installs Tailscale and/or VirtualHere | See below |
+| Optional, with VirtualHere: installs `/usr/local/bin/moonlight-usb-handoff` and the `moonlight-usb-handoff` service, and stops the VirtualHere server starting at boot | Shares USB devices with your PC only while you're streaming (see below) |
 
 Everything the script adds is wrapped in marker comments, and every file is backed up first, so it's safe to **run it again** to change your choices. Answering No to an option you turned on before undoes it (for example, boot messages come back and the quit-on-shutdown service is removed).
 
@@ -135,8 +137,25 @@ With this option, the Pi tells every PC it's paired with to quit its running gam
 
 - Install the **VirtualHere client** on your PC: https://www.virtualhere.com/usb_client_software
 - The free version shares **one device at a time**. More needs a licence from virtualhere.com.
-- A device shared through VirtualHere goes to the PC, so Moonlight on the Pi won't see it. Use one method per device.
+- While a device is shared through VirtualHere it belongs to the PC, so Moonlight on the Pi can't see it.
 - Works best at home. Over Tailscale, USB devices may feel laggy.
+
+#### Sharing USB devices only while streaming (recommended)
+
+With this option, a controller plugged into the Pi works in Moonlight's menus between streams, and moves to your PC (with full haptics and adaptive triggers on a DualSense) while you're streaming. The Pi watches Moonlight's log: when a stream starts it switches the VirtualHere server on, and when the stream ends (quit or disconnect) it switches it off, which gives the devices back to the Pi.
+
+Set up the PC once:
+
+1. Keep the VirtualHere client running all the time. Add it to Windows startup (for example, put a shortcut to `vhui64.exe` in the folder that opens when you type `shell:startup` in the Run box).
+2. In the client, right-click each device that should move to the PC and turn on **Auto-Use**. Devices without Auto-Use (such as the Pi's keyboard receiver) stay with the Pi. Choosing **Stop using** on a device turns its Auto-Use off, so turn it back on afterwards.
+3. Make the client look for the Pi more often. By default it checks every 30 seconds, so the controller can take up to half a minute to reach the PC. Close the client (from its tray icon), open `%APPDATA%\vhui.ini` in Notepad, change `AutoRefreshLookupPeriod=30` to `AutoRefreshLookupPeriod=5`, save, and start the client again.
+
+Then:
+
+- When a stream starts, the controller takes a few seconds to appear on the PC (2–8 seconds in testing with the setting above). When the stream ends, it's back on the Pi within about 2 seconds.
+- **To end a stream, quit the game or app on the PC** (for example, exit Steam Big Picture), or press Ctrl+Alt+Shift+Q on a keyboard plugged into the Pi. The controller is on the PC during a stream, so Moonlight's controller shortcut (Select+Start+L1+R1) can't reach the Pi.
+- It needs Moonlight to start automatically, because it reads the log that the auto-start writes.
+- To see what it's doing: `journalctl -u moonlight-usb-handoff --no-pager`
 
 ## Troubleshooting
 
@@ -176,7 +195,7 @@ Re-run the script. If it persists, check that `~/.config/moonlight-pi-setup/eglf
 ~/.local/share/moonlight-pi-setup/moonlight-pi-setup.sh --uninstall
 ```
 
-This removes the settings the script added, restores your original `~/.asoundrc` if you had one, puts back how the Pi originally booted (to the desktop, or to a console login on Lite), restores the boot options and Wi-Fi power saving, and removes the quit-on-shutdown service (without quitting a game that's running at the time). It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
+This removes the settings the script added, restores your original `~/.asoundrc` if you had one, puts back how the Pi originally booted (to the desktop, or to a console login on Lite), restores the boot options and Wi-Fi power saving, switches VirtualHere back to sharing all the time, and removes the quit-on-shutdown service (without quitting a game that's running at the time). It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
 
 ## Known limitations
 
