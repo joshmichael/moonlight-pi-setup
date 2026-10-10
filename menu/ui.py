@@ -286,6 +286,16 @@ def draw_hints(surf, hints, style):
         x = draw_text(surf, label, (x, cy), 28, DIM, anchor='midleft').right + 40
 
 
+def pairing_box(surf, box):
+    """The "Looking for a controller" box shown while auto-pairing."""
+    rrect(surf, ACCENT_SOFT, box, 18)
+    spinner(surf, (box.right - 44, box.y + 44), 18, WHITE, 5)
+    y = draw_text(surf, 'Looking for a controller', (box.x + 24, box.y + 22), 32, TEXT, bold=True).bottom
+    draw_wrapped(surf, 'Put a Bluetooth controller in pairing mode and it connects by itself. '
+                 'PlayStation: hold Create (Share) + PS. Xbox: hold the pair button on top.',
+                 (box.x + 24, y + 14), box.width - 48, 28, TEXT, line_gap=6)
+
+
 # ---------------------------------------------------------------------------
 # QR codes
 # ---------------------------------------------------------------------------
@@ -322,8 +332,12 @@ def wifi_qr_text(ssid, password):
 # Lists
 # ---------------------------------------------------------------------------
 class Item:
+    """A list row. toggle=True/False draws an On/Off switch; desc is shown in
+    the info panel of screens that describe the highlighted row."""
+
     def __init__(self, label, action=None, detail='', key=None, selectable=True,
-                 color=None, detail_color=None, signal=None, locked=False, spinner=False):
+                 color=None, detail_color=None, signal=None, locked=False, spinner=False,
+                 toggle=None, desc=''):
         self.label = label
         self.action = action
         self.detail = detail
@@ -334,6 +348,17 @@ class Item:
         self.signal = signal
         self.locked = locked
         self.spinner = spinner
+        self.toggle = toggle
+        self.desc = desc
+
+
+def switch(surf, x, cy, on):
+    """An On/Off switch 76 px wide, vertically centred on cy."""
+    def draw(s, k):
+        pygame.draw.rect(s, GOOD if on else (70, 77, 94), (0, 0, 76 * k, 42 * k), border_radius=21 * k)
+        pygame.draw.circle(s, WHITE if on else (196, 201, 212), ((55 if on else 21) * k, 21 * k), 16 * k)
+    surf.blit(_icon(('switch', on), (76, 42), draw), (x, cy - 21))
+    return 76
 
 
 class ListView:
@@ -418,6 +443,9 @@ class ListView:
                 rrect(surf, PANEL, r, 18)
             label_color = WHITE if selected else (it.color or (TEXT if it.selectable else DIM))
             right = r.right - 28
+            if it.toggle is not None:
+                switch(surf, right - 76, r.centery, it.toggle)
+                right -= 76 + 24
             if it.signal is not None:
                 signal_bars(surf, right - 44, r.centery, it.signal, WHITE if selected else TEXT)
                 right -= 44 + 22

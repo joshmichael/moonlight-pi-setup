@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Moonlight Pi menu: controllers (Bluetooth), Wi-Fi and power, on the TV.
+"""Moonlight Pi menu: controllers (Bluetooth), Wi-Fi, settings and power, on the TV.
 
 Shown by the auto-start loop in ~/.bash_profile when Moonlight closes (and at
-boot when the Pi is offline or has no controller). Works with a controller,
-a keyboard or a mouse.
+boot when the Pi is offline, has no controller, or hasn't had its Quick setup
+yet). Works with a controller, a keyboard or a mouse.
 
 Exit codes: 0 = start Moonlight, 10 = command line, 20 = restarting/shutting
 down. Anything else means the menu failed, and the loop falls back to the
@@ -29,6 +29,8 @@ import ui  # noqa: E402
 from ui import (W, MARGIN, CONTENT_Y, FOOTER_Y, HEADER_Y, BG, PANEL, ACCENT, TEXT, DIM, FAINT,  # noqa: E402
                 GOOD, WARN, BAD, Item, ListScreen, Screen, Dialog, KeyboardScreen,
                 draw_text, draw_wrapped, rrect, dot)
+import settings  # noqa: E402
+from settings_screens import QuickSetup, SettingsScreen  # noqa: E402
 
 log = logging.getLogger('moonlight-menu')
 
@@ -81,6 +83,8 @@ def input_devices():
 
 def boot_decision(net):
     """None to go straight to Moonlight, or why the menu should open instead."""
+    if settings.state_get('quick_setup') == '1':
+        return 'quick-setup'
     net.wait_startup(20)
     if not net.online():
         return 'offline'
@@ -154,11 +158,13 @@ class App:
         if args.fake:
             import fakes
             self.net, self.bt, self.phone = fakes.FakeNetwork(), fakes.FakeBluetooth(), fakes.FakePhoneSetup()
+            self.settings = fakes.FakeSettings()
         else:
             import bluetooth
             import network
             self.net = network.Network()
             self.phone = PhoneSetup()
+            self.settings = settings.Settings()
             try:
                 self.bt = bluetooth.Bluetooth()
                 if not self.bt.available():
@@ -187,6 +193,8 @@ class App:
         self.autopair = False
         self.autopair_paused = False
         self.fast_poll = False
+        self.quiet_boot_at_start = None   # to tell when a change needs a restart
+        self.restart_prompted = False
         self.shot_requested = False
         self.test_steps = []
         self.test_next = 0
@@ -674,12 +682,21 @@ class App:
         return bool(self.busy or self.toast or self.holds or getattr(self.top, 'animating', False))
 
     # -- main loop ----------------------------------------------------------
+    def _offline_screens(self, after_setup=False):
+        """At boot without a network, go straight to Wi-Fi setup from a phone."""
+        if not self.net.wifi_dev:
+            return
+        if self.reason == 'offline' or (after_setup and self.net_status is not None and not self.online()):
+            self.push(NetworkScreen(self))
+            self.push(PhoneSetupScreen(self))
+
     def run(self):
         pg = self.pg
         self.push(HomeScreen(self))
-        if self.reason == 'offline' and self.net.wifi_dev:
-            self.push(NetworkScreen(self))
-            self.push(PhoneSetupScreen(self))
+        if self.settings.quick_setup_pending():
+            QuickSetup(self, then=lambda: self._offline_screens(after_setup=True)).start()
+        else:
+            self._offline_screens()
         threading.Thread(target=self._poll_loop, daemon=True).start()
         started = time.monotonic()
         autopair_checked = False
@@ -815,6 +832,7 @@ class HomeScreen(ListScreen):
             Item('Wi-Fi & network', lambda: app.push(NetworkScreen(app)), key='net',
                  detail=net_summary(app.net_status),
                  detail_color=GOOD if app.online() else WARN),
+            Item('Settings', lambda: app.push(SettingsScreen(app)), key='settings'),
             Item('Restart or shut down', lambda: app.push(PowerScreen(app)), key='power'),
             Item('Command line', self._shell, key='shell'),
         ])
@@ -856,13 +874,7 @@ class HomeScreen(ListScreen):
             y += 48
         if app.autopair:
             y += 24
-            box = ui.pygame.Rect(rect.x - 16, y, rect.width + 32, rect.bottom - y + 16)
-            rrect(surf, ui.ACCENT_SOFT, box, 18)
-            ui.spinner(surf, (box.right - 44, box.y + 44), 18, (255, 255, 255), 5)
-            yy = draw_text(surf, 'Looking for a controller', (box.x + 24, box.y + 22), 32, TEXT, bold=True).bottom
-            draw_wrapped(surf, 'Put a Bluetooth controller in pairing mode and it connects by itself. '
-                         'PlayStation: hold Create (Share) + PS. Xbox: hold the pair button on top.',
-                         (box.x + 24, yy + 14), box.width - 48, 28, TEXT, line_gap=6)
+            ui.pairing_box(surf, ui.pygame.Rect(rect.x - 16, y, rect.width + 32, rect.bottom - y + 16))
 
     @property
     def animating(self):
@@ -1517,8 +1529,8 @@ class PowerScreen(ListScreen):
         ])
 
     def draw_panel(self, surf, rect):
-        draw_wrapped(surf, 'Shutting down also ends any game still running on your PC, if "quit on '
-                     'shutdown" was turned on during setup.', (rect.x, rect.y), rect.width, 30)
+        draw_wrapped(surf, 'Shutting down also ends any game still running on your PC, if "Quit game on PC at '
+                     'shutdown" is on in Settings.', (rect.x, rect.y), rect.width, 30)
 
 
 # ---------------------------------------------------------------------------
@@ -1526,7 +1538,8 @@ def main():
     p = argparse.ArgumentParser(description='Moonlight Pi menu')
     p.add_argument('--boot', action='store_true', help='decide at boot whether the menu is needed')
     p.add_argument('--fake', action='store_true', help='use fake Wi-Fi/Bluetooth data (testing)')
-    p.add_argument('--reason', choices=['offline', 'no-controller'], help='open as if for this reason (testing)')
+    p.add_argument('--reason', choices=['offline', 'no-controller', 'quick-setup'],
+                   help='open as if for this reason (testing)')
     p.add_argument('--test-input', help='comma-separated actions to run headless (testing)')
     p.add_argument('--style', choices=['ps', 'xbox', 'switch', 'steam', 'keyboard'],
                    help='button style to start with (testing)')
