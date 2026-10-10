@@ -2,18 +2,19 @@
 #
 # moonlight-pi-setup.sh
 #
-# Turns a Raspberry Pi 5 running Raspberry Pi OS (64-bit, Trixie; Lite or desktop)
-# into a Moonlight game-streaming client that can boot straight into Moonlight.
+# Turns a Raspberry Pi 5 running Raspberry Pi OS Lite (64-bit, Trixie) into a
+# Moonlight game-streaming client that can boot straight into Moonlight.
 #
 # Usage:
 #   ./moonlight-pi-setup.sh              Install, or re-run to change settings
 #   ./moonlight-pi-setup.sh --uninstall  Undo the changes this script made
-#   ./moonlight-pi-setup.sh --force      Skip the hardware/OS checks (unsupported)
+#   ./moonlight-pi-setup.sh --force      Skip the hardware/OS checks, for example to
+#                                        install on the desktop version (unsupported)
 #   ./moonlight-pi-setup.sh --help       Show help
 #
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="1.7.0"
 
 # Change this to your own repository before publishing.
 REPO_URL="https://github.com/joshmichael/moonlight-pi-setup"
@@ -71,10 +72,8 @@ FORCE=0
 OS_CODENAME=""
 HDMI_PORT=""
 DISPLAY_DEVICE=""
-AUDIO_MODE=""          # stereo | 5.1 | 7.1 | system
+AUDIO_MODE=""          # stereo | 5.1 | 7.1
 OPT_AUTOSTART=0
-IS_DESKTOP=0
-HAS_AUDIO_SERVER=0
 OPT_QUIET_BOOT=0
 OPT_QUIT_ON_SHUTDOWN=0
 OPT_TAILSCALE=0
@@ -264,8 +263,8 @@ hdmi_connected() {
   return 1
 }
 
-# Is the desktop version of Raspberry Pi OS installed? Still true after we've
-# switched the Pi to boot to the console, because the display manager remains.
+# Is the desktop version of Raspberry Pi OS installed (rather than Lite)? Still
+# true after switching the Pi to boot to the console, as the display manager remains.
 desktop_installed() {
   [[ $(systemctl get-default 2>/dev/null || true) == "graphical.target" ]] \
     || [[ -e /etc/systemd/system/display-manager.service ]]
@@ -273,6 +272,7 @@ desktop_installed() {
 
 # How the Pi currently boots, using raspi-config's names:
 #   B1 console, B2 console with auto-login, B3 desktop, B4 desktop with auto-login
+# (B3 and B4 only on the desktop version, installed with --force)
 current_boot_behaviour() {
   if [[ $(systemctl get-default 2>/dev/null || true) == "graphical.target" ]]; then
     if grep -qs '^autologin-user=' "$LIGHTDM_CONF"; then echo B4; else echo B3; fi
@@ -295,16 +295,6 @@ virtualhere_installed() {
   local units
   units=$(systemctl list-unit-files 2>/dev/null || true)
   grep -qi virtualhere <<<"$units"
-}
-
-audio_server_present() {
-  if pgrep -x pipewire > /dev/null 2>&1 || pgrep -x pulseaudio > /dev/null 2>&1; then
-    return 0
-  fi
-  if package_installed pipewire-pulse || package_installed pulseaudio; then
-    return 0
-  fi
-  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -360,10 +350,9 @@ preflight() {
     check_failed "This script is written for Raspberry Pi OS based on Trixie (detected: ${OS_CODENAME})."
   fi
 
-  # Lite vs desktop
+  # Lite only: Moonlight runs on its own on the TV, without a desktop.
   if desktop_installed; then
-    IS_DESKTOP=1
-    ok "Raspberry Pi OS with desktop"
+    check_failed "This script is for Raspberry Pi OS Lite (64-bit), but this is the desktop version. Please install Raspberry Pi OS Lite (64-bit) with Raspberry Pi Imager."
   else
     ok "Raspberry Pi OS Lite"
   fi
@@ -419,11 +408,6 @@ preflight() {
       warn "Gigabit (1000 Mb/s, full duplex) is expected. Check the cable and your router or switch."
     fi
   fi
-
-  # Audio server (the desktop version uses PipeWire)
-  if audio_server_present; then
-    HAS_AUDIO_SERVER=1
-  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -435,19 +419,9 @@ ask_questions() {
     info "The defaults below are the answers you gave last time."
   fi
 
-  if (( IS_DESKTOP )); then
-    echo "    This Pi boots to the desktop. For the best performance, and for HDR, Moonlight"
-    echo "    can start on its own instead of the desktop. The desktop stays installed, and"
-    echo "    uninstalling this setup switches the Pi back to booting to the desktop."
-    if ask_yes_no "    Boot straight into Moonlight instead of the desktop? (recommended)" \
-        "$(previous_choice autostart y)"; then
-      OPT_AUTOSTART=1
-    fi
-  else
-    if ask_yes_no "    Start Moonlight automatically when the Pi boots? (recommended)" \
-        "$(previous_choice autostart y)"; then
-      OPT_AUTOSTART=1
-    fi
+  if ask_yes_no "    Start Moonlight automatically when the Pi boots? (recommended)" \
+      "$(previous_choice autostart y)"; then
+    OPT_AUTOSTART=1
   fi
 
   # The menu replaces the "Moonlight closed" prompt of the auto-start loop.
@@ -476,43 +450,33 @@ ask_questions() {
     fi
   fi
 
-  # When Moonlight runs from the desktop, the desktop's audio server handles
-  # the speakers. When it runs on its own, it talks to the HDMI audio directly.
-  if (( HAS_AUDIO_SERVER )) && (( ! OPT_AUTOSTART )); then
-    AUDIO_MODE="system"
-    info "Audio will be handled by the desktop. To use surround sound, choose 5.1 or 7.1"
-    info "for the HDMI output in the desktop's sound settings."
-  fi
-
-  if [[ $AUDIO_MODE != "system" ]]; then
-    echo "    Which speaker setup do you have?"
-    echo "      1) Stereo (TV speakers, soundbar or headphones)"
-    echo "      2) 5.1 surround"
-    echo "      3) 7.1 surround"
-    local choice default_choice=1
-    case "$(state_get audio_mode)" in
-      5.1) default_choice=2 ;;
-      7.1) default_choice=3 ;;
+  echo "    Which speaker setup do you have?"
+  echo "      1) Stereo (TV speakers, soundbar or headphones)"
+  echo "      2) 5.1 surround"
+  echo "      3) 7.1 surround"
+  local choice default_choice=1
+  case "$(state_get audio_mode)" in
+    5.1) default_choice=2 ;;
+    7.1) default_choice=3 ;;
+  esac
+  while true; do
+    printf '    Choose 1, 2 or 3 [%s]: ' "$default_choice"
+    read_tty choice
+    case "${choice:-$default_choice}" in
+      1) AUDIO_MODE="stereo"; break ;;
+      2) AUDIO_MODE="5.1"; break ;;
+      3)
+        AUDIO_MODE="7.1"
+        echo
+        warn "7.1 audio setup is experimental and hasn't been fully tested."
+        warn "If any speakers play the wrong channel, or you run into other problems,"
+        warn "please report it on GitHub: ${ISSUES_URL}"
+        echo
+        break
+        ;;
+      *) echo "    Please enter 1, 2 or 3." ;;
     esac
-    while true; do
-      printf '    Choose 1, 2 or 3 [%s]: ' "$default_choice"
-      read_tty choice
-      case "${choice:-$default_choice}" in
-        1) AUDIO_MODE="stereo"; break ;;
-        2) AUDIO_MODE="5.1"; break ;;
-        3)
-          AUDIO_MODE="7.1"
-          echo
-          warn "7.1 audio setup is experimental and hasn't been fully tested."
-          warn "If any speakers play the wrong channel, or you run into other problems,"
-          warn "please report it on GitHub: ${ISSUES_URL}"
-          echo
-          break
-          ;;
-        *) echo "    Please enter 1, 2 or 3." ;;
-      esac
-    done
-  fi
+  done
 
   if ask_yes_no "    Hide boot messages for a cleaner startup? (recommended)" \
       "$(previous_choice quiet_boot y)"; then
@@ -569,15 +533,10 @@ ask_questions() {
   step "Summary"
   info "Moonlight:        install the official moonlight-qt package"
   case "$AUDIO_MODE" in
-    system) info "Audio:            handled by the desktop's sound settings" ;;
-    7.1)    info "Audio:            7.1 surround (experimental), on whichever HDMI port the TV uses" ;;
-    *)      info "Audio:            ${AUDIO_MODE}, on whichever HDMI port the TV uses" ;;
+    7.1) info "Audio:            7.1 surround (experimental), on whichever HDMI port the TV uses" ;;
+    *)   info "Audio:            ${AUDIO_MODE}, on whichever HDMI port the TV uses" ;;
   esac
-  if (( IS_DESKTOP )); then
-    info "Boot into:        $( (( OPT_AUTOSTART )) && echo "Moonlight (desktop still installed)" || echo "the desktop")"
-  else
-    info "Auto-start:       $( (( OPT_AUTOSTART )) && echo yes || echo no)"
-  fi
+  info "Auto-start:       $( (( OPT_AUTOSTART )) && echo yes || echo no)"
   if (( OPT_AUTOSTART )); then
     info "TV menu:          $( (( OPT_MENU )) && echo "yes (controllers, Wi-Fi, power)" || echo no)"
   fi
@@ -768,15 +727,6 @@ remove_asoundrc() {
 }
 
 setup_audio() {
-  if [[ $AUDIO_MODE == "system" ]]; then
-    # An earlier run may have written ~/.asoundrc. Left in place, it would take
-    # the HDMI audio away from the desktop's audio server.
-    if asoundrc_is_ours; then
-      step "Handing audio back to the desktop"
-      remove_asoundrc
-    fi
-    return 0
-  fi
   step "Configuring ${AUDIO_MODE} audio"
 
   if [[ -f $ASOUNDRC ]] && ! asoundrc_is_ours; then
@@ -798,13 +748,6 @@ setup_audio() {
   local channels=2
   [[ $AUDIO_MODE == "5.1" ]] && channels=6
   [[ $AUDIO_MODE == "7.1" ]] && channels=8
-
-  if (( HAS_AUDIO_SERVER )); then
-    # The desktop's audio server may be using the HDMI audio right now.
-    info "To check your speakers, run this after rebooting (each speaker announces itself):"
-    info "  speaker-test -c ${channels} -t wav -l 1"
-    return 0
-  fi
 
   echo
   info "You can play a speaker test now. Each speaker will announce its position."
@@ -868,7 +811,7 @@ setup_autologin() {
   # --uninstall (or turning auto-start off) can put it back.
   if [[ -z $original ]]; then
     if [[ $(state_get autologin_enabled_by_script) == 1 ]]; then
-      original=B1   # installed by an older version of this script (Lite only)
+      original=B1   # installed by an older version of this script
     else
       original=$current
     fi
@@ -893,10 +836,6 @@ setup_autologin() {
     fi
     if [[ $original != B2 ]]; then
       state_set autologin_enabled_by_script 1
-    fi
-    if (( IS_DESKTOP )); then
-      info "The desktop is still installed. To open it, quit Moonlight, press a key, then"
-      info "type: sudo systemctl start display-manager"
     fi
   elif [[ $(state_get autologin_enabled_by_script) == 1 ]]; then
     # Auto-start was turned on by an earlier run and has now been turned off.
@@ -942,9 +881,8 @@ setup_bash_profile() {
     fi
     # shellcheck disable=SC2016
     echo 'export QT_QPA_EGLFS_KMS_CONFIG="$HOME/.config/moonlight-pi-setup/eglfs.json"'
-    if [[ $AUDIO_MODE != "system" ]]; then
-      echo 'export AUDIODEV=default'
-      cat <<EOF
+    echo 'export AUDIODEV=default'
+    cat <<EOF
 # Send audio to whichever HDMI port has a screen connected (HDMI 0 is checked
 # first). Falls back to HDMI ${HDMI_PORT}, the port used during setup.
 moonlight_hdmi_card() {
@@ -959,9 +897,8 @@ moonlight_hdmi_card() {
 }
 export MOONLIGHT_HDMI_CARD="\$(moonlight_hdmi_card)"
 EOF
-      # Use the ALSA settings above even if PipeWire (desktop version) is installed.
-      echo 'export SDL_AUDIODRIVER=alsa'
-    fi
+    # Use the ALSA settings above, even if an audio server such as PipeWire is installed.
+    echo 'export SDL_AUDIODRIVER=alsa'
     if (( OPT_AUTOSTART && OPT_MENU )); then
       cat <<'EOF'
 # Start Moonlight on the TV (tty1 only, so SSH logins are not affected). When it
@@ -983,9 +920,6 @@ if [ "$(tty)" = "/dev/tty1" ]; then
         ;;
       10)
         echo "Type 'exit' to go back to Moonlight and the menu."
-        if [ -e /etc/systemd/system/display-manager.service ]; then
-          echo "To open the desktop, type: sudo systemctl start display-manager"
-        fi
         break
         ;;
       20)
@@ -1017,9 +951,6 @@ if [ "$(tty)" = "/dev/tty1" ]; then
     if read -r -t 5 -n 1; then
       echo
       echo "Type 'moonlight-qt' to start Moonlight again, or 'sudo reboot' to restart the Pi."
-      if [ -e /etc/systemd/system/display-manager.service ]; then
-        echo "To open the desktop, type: sudo systemctl start display-manager"
-      fi
       break
     fi
   done
@@ -1509,12 +1440,6 @@ finish_install() {
     *)   info "  - Audio:        Stereo" ;;
   esac
   echo
-  if (( IS_DESKTOP )) && (( ! OPT_AUTOSTART )); then
-    info "Open Moonlight from the desktop's applications menu (under Games)."
-    info "Tip: running Moonlight from the desktop works, but HDR and the lowest latency"
-    info "need it to run on its own. Re-run this script to switch at any time."
-    echo
-  fi
   info "On your gaming PC you need a streaming host: Sunshine, Apollo or Vibepollo."
   if (( OPT_VIRTUALHERE || OPT_TAILSCALE )) || virtualhere_installed || command -v tailscale > /dev/null 2>&1; then
     echo
@@ -1590,7 +1515,8 @@ do_uninstall() {
     ok "Removed ${SYSCTL_FILE} (takes effect after a reboot)"
   fi
 
-  # Boot behaviour: put back how the Pi booted before (desktop or console)
+  # Boot behaviour: put back how the Pi booted before (a console login, or the
+  # desktop if this was installed on the desktop version with --force)
   if [[ $(state_get autologin_enabled_by_script) == 1 ]] && command -v raspi-config > /dev/null 2>&1; then
     local original current
     original=$(state_get original_boot_behaviour)
@@ -1669,14 +1595,15 @@ usage() {
   cat <<EOF
 moonlight-pi-setup ${SCRIPT_VERSION}
 
-Sets up a Raspberry Pi 5 running Raspberry Pi OS (64-bit, Trixie; Lite or
-desktop) as a Moonlight game-streaming client.
+Sets up a Raspberry Pi 5 running Raspberry Pi OS Lite (64-bit, Trixie) as a
+Moonlight game-streaming client.
 
 Usage: $0 [option]
 
   (no option)    Install, or re-run to change your settings
   --uninstall    Undo the changes this script made
-  --force        Skip the hardware and OS checks (unsupported)
+  --force        Skip the hardware and OS checks, for example to install on
+                 the desktop version of Raspberry Pi OS (unsupported)
   --help         Show this help
   --version      Show the version
 
