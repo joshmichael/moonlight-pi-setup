@@ -470,6 +470,10 @@ class Screen:
     def handle(self, action):
         pass
 
+    def repeat_action(self, action):
+        """What holding down the button for `action` repeats, or None to press it once."""
+        return None
+
     def hover(self, pos):
         pass
 
@@ -674,6 +678,17 @@ class KeyboardScreen(Screen):
     def controls(self):
         return OSK_CONTROLS.get(self.app.style, OSK_CONTROLS['xbox'])
 
+    def repeat_action(self, action):
+        # Holding delete keeps deleting, and holding the cursor buttons keeps moving.
+        # A held delete repeats as a plain delete, so on a Switch holding B empties
+        # the field but doesn't go on to close the keyboard.
+        op = self.controls().get(action)
+        if op == 'delete':
+            return 'backspace'
+        if op in ('left', 'right'):
+            return action
+        return None
+
     # -- layout --------------------------------------------------------------
     def _layout(self):
         rows = SYMBOLS if self.symbols else LETTERS
@@ -867,7 +882,7 @@ class KeyboardScreen(Screen):
         if self.error:
             draw_text(surf, self.error, (MARGIN, field.bottom + 24), 32, BAD)
         else:
-            draw_text(surf, '%d characters' % len(self.text), (MARGIN, field.bottom + 24), 28, FAINT)
+            draw_text(surf, '%d character%s' % (len(self.text), '' if len(self.text) == 1 else 's'), (MARGIN, field.bottom + 24), 28, FAINT)
         upper = self._upper()
         for r, row in enumerate(self.keys):
             for c, (kid, label, rect) in enumerate(row):

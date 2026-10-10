@@ -417,17 +417,27 @@ class App:
         self.top.handle(action)
 
     def _press_dir(self, source, action):
-        self.holds[source] = (action, time.monotonic() + REPEAT_DELAY)
+        self.holds[source] = (action, time.monotonic() + REPEAT_DELAY, None)
         self.dispatch(action)
+
+    def _press_button(self, source, action):
+        """Press a button; held down, it repeats if the screen wants (delete on the keyboard)."""
+        screen = self.top
+        repeat = None if self.dialog or self.busy else screen.repeat_action(action)
+        self.dispatch(action)
+        if repeat:
+            self.holds[source] = (repeat, time.monotonic() + REPEAT_DELAY, screen)
 
     def _release(self, source):
         self.holds.pop(source, None)
 
     def _repeat_holds(self):
         now = time.monotonic()
-        for src, (action, t) in list(self.holds.items()):
-            if now >= t:
-                self.holds[src] = (action, now + REPEAT_RATE)
+        for src, (action, t, screen) in list(self.holds.items()):
+            if screen and (screen is not self.top or self.dialog):
+                del self.holds[src]         # the screen it was repeating on has gone
+            elif now >= t:
+                self.holds[src] = (action, now + REPEAT_RATE, screen)
                 self.dispatch(action)
 
     def _controller_input(self):
@@ -531,8 +541,12 @@ class App:
                 self._press_dir(src, dirs[button])
             else:
                 self._release(src)
-        elif down and button in actions:
-            self.dispatch(actions[button])
+        elif button in actions:
+            src = ('btn', jid, button)
+            if down:
+                self._press_button(src, actions[button])
+            else:
+                self._release(src)
 
     def _axis(self, src, vertical, v, style='xbox'):
         if abs(v) > 0.6:
@@ -553,9 +567,10 @@ class App:
             self.triggers[key] = True
             self._controller_input()
             self.style = style_for(self.controllers[jid][1])
-            self.dispatch('lt' if axis == self.pg.CONTROLLER_AXIS_TRIGGERLEFT else 'rt')
+            self._press_button(('trig', jid, axis), 'lt' if axis == self.pg.CONTROLLER_AXIS_TRIGGERLEFT else 'rt')
         elif v < 0.3 and pressed:
             self.triggers[key] = False
+            self._release(('trig', jid, axis))
 
     def _generic_joystick(self, e):
         pg = self.pg
@@ -576,7 +591,9 @@ class App:
             self.style = 'xbox'
             action = {0: 'select', 1: 'back', 2: 'x', 3: 'y'}.get(e.button, 'start' if e.button >= 7 else None)
             if action:
-                self.dispatch(action)
+                self._press_button(('jbtn', jid, e.button), action)
+        elif e.type == pg.JOYBUTTONUP:
+            self._release(('jbtn', jid, e.button))
 
     def _key(self, e):
         pg = self.pg
@@ -757,6 +774,10 @@ class App:
                 self.dispatch(('char', ch))
         elif step.startswith('mods:'):          # e.g. mods:shift, mods:none
             self.pg.key.set_mods(self.pg.KMOD_LSHIFT if step[5:] == 'shift' else 0)
+        elif step.startswith('hold:'):          # hold a button down until 'release'
+            self._press_button(('test', None), step[5:])
+        elif step == 'release':
+            self._release(('test', None))
         elif step == 'quit':
             self.exit_code = 99
         else:
