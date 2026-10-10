@@ -1529,8 +1529,8 @@ class PowerScreen(ListScreen):
         ])
 
     def draw_panel(self, surf, rect):
-        draw_wrapped(surf, 'Shutting down also ends any game still running on your PC, if "Quit game on PC at '
-                     'shutdown" is on in Settings.', (rect.x, rect.y), rect.width, 30)
+        draw_wrapped(surf, 'Shutting down also ends the stream on your PC, if "End stream on PC at shutdown" is on '
+                     'in Settings.', (rect.x, rect.y), rect.width, 30)
 
 
 # ---------------------------------------------------------------------------

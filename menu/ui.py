@@ -460,8 +460,14 @@ class ListView:
                 dr = draw_text(surf, it.detail, (right, r.centery), 30, dcolor, anchor='midright',
                                max_width=r.width // 2)
                 right = dr.left - 24
-            draw_text(surf, it.label, (r.x + 32, r.centery), 38, label_color,
-                      bold=selected, anchor='midleft', max_width=right - r.x - 40)
+            # A long label gets a slightly smaller font before it's cut short. It's
+            # measured in bold so the size doesn't change when it's highlighted.
+            max_w = right - r.x - 40
+            size = 38
+            while size > 30 and font(size, True).size(it.label)[0] > max_w:
+                size -= 2
+            draw_text(surf, it.label, (r.x + 32, r.centery), size, label_color,
+                      bold=selected, anchor='midleft', max_width=max_w)
             y += self.item_h + self.gap
         if self.scroll > 0:
             pygame.draw.polygon(surf, DIM, [(self.rect.centerx - 14, self.rect.y - 14),

@@ -179,11 +179,12 @@ class FakePhoneSetup:
 
 class FakeSettings:
     KEYS = {'quit-on-shutdown': 'quit_on_shutdown', 'usb-handoff': 'usb_handoff', 'quiet-boot': 'quiet_boot',
-            'wifi-powersave': 'wifi_powersave'}
+            'wifi-powersave': 'wifi_powersave', 'virtualhere-tailscale': 'vh_tailscale'}
 
     def __init__(self):
         self.st = {'speakers': '5.1', 'quit_on_shutdown': '1', 'virtualhere': '1', 'usb_handoff': '1',
-                   'quiet_boot': '1', 'wifi': '1', 'wifi_powersave': '0', 'wifi_country': 'GB', 'tailscale': '1'}
+                   'vh_tailscale': '0', 'vh_port': '7575', 'quiet_boot': '1', 'wifi': '1', 'wifi_powersave': '0',
+                   'wifi_country': 'GB', 'tailscale': '1'}
         self.pending = bool(os.environ.get('FAKE_QUICK_SETUP'))
         state = os.environ.get('FAKE_TAILSCALE', 'Running')
         self.ts = {'installed': state != 'none', 'state': state if state != 'none' else '',

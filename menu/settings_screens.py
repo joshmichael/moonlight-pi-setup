@@ -26,21 +26,27 @@ SPEAKER_OPTIONS = [
 DESCRIPTIONS = {
     'speakers': 'Stereo, 5.1 or 7.1 surround, and a speaker test. Moonlight\'s own audio setting is changed '
                 'to match.',
-    'quit': 'When the Pi is switched off, for example with its power button, ask your PC to quit the game, so '
-            'the PC isn\'t left stuck on the stream. The game closes without saving.',
-    'usb': 'On: a controller plugged into the Pi works here and in Moonlight between streams, and moves to your '
-           'PC while you\'re streaming. Off: USB devices stay on the PC all the time.',
+    'quit': 'When the Pi is switched off, for example with its power button, it tells your PC to end the stream, '
+            'so the PC isn\'t left stuck on it. The game you\'re streaming closes, so save first.',
+    'virtualhere': 'VirtualHere sends USB devices plugged into the Pi, like a wired controller, to your PC as if '
+                   'they were plugged into it. Choose when, and whether it works over Tailscale.',
+    'usb': 'On: USB devices plugged into the Pi, like a wired controller, stay on the Pi between streams, so they '
+           'work in this menu and in Moonlight. VirtualHere sends them to your PC while you\'re streaming. '
+           'Off: VirtualHere sends them to your PC all the time.',
+    'vh_tailscale': 'Not recommended. Lets your PC use the Pi\'s USB devices when you\'re streaming away from home, '
+                    'over Tailscale. It adds input lag and stutter, and away from home controllers work better '
+                    'through Moonlight. Off: VirtualHere only works at home.',
     'tailscale': 'Stream when you\'re away from home: see whether Tailscale is connected, sign in with your '
                  'phone, or turn it off.',
     'tailscale_install': 'Tailscale lets you stream when you\'re away from home. It\'s free for personal use.',
-    'powersave': 'Power saving makes the Wi-Fi doze between packets, which causes stutter and lag spikes when '
-                 'streaming. Best left off.',
+    'powersave': 'Power saving can make Wi-Fi doze between packets, which can cause stutter and lag spikes when '
+                 'streaming. Keeping this off is recommended.',
     'country': 'Wi-Fi uses different channels in each country. The Pi needs to know where it is to find every '
                'network.',
     'quiet': 'Hide the text and the splash screen shown while the Pi starts. Takes effect after a restart.',
     'updates': 'Update Moonlight and the system, or this setup.',
     'about': 'Network addresses, versions, temperature and power.',
-    'quick': 'Go through the first-time questions again: speakers, quitting games at shutdown, and more.',
+    'quick': 'Go through the first-time questions again: speakers, ending the stream at shutdown, and more.',
 }
 
 
@@ -308,14 +314,15 @@ class SettingsScreen(ListScreen):
         items = [
             Item('Speakers', lambda: app.push(SpeakersScreen(app, st.get('speakers'), self.load)), key='speakers',
                  detail=speakers, desc=DESCRIPTIONS['speakers']),
-            Item('Quit game on PC at shutdown', lambda: self._toggle('quit-on-shutdown', 'quit_on_shutdown',
-                                                                    'Quit game at shutdown'),
+            Item('End stream on PC at shutdown', lambda: self._toggle('quit-on-shutdown', 'quit_on_shutdown',
+                                                                     'End stream at shutdown'),
                  key='quit', toggle=st.get('quit_on_shutdown') == '1', desc=DESCRIPTIONS['quit']),
         ]
         if st.get('virtualhere') == '1':
-            items.append(Item('Share USB only while streaming',
-                              lambda: self._toggle('usb-handoff', 'usb_handoff', 'Share USB only while streaming'),
-                              key='usb', toggle=st.get('usb_handoff') == '1', desc=DESCRIPTIONS['usb']))
+            items.append(Item('VirtualHere', lambda: app.push(VirtualHereScreen(app)), key='virtualhere',
+                              detail='USB to PC while streaming' if st.get('usb_handoff') == '1'
+                              else 'USB to PC all the time',
+                              desc=DESCRIPTIONS['virtualhere']))
         items.append(Item('Tailscale', lambda: app.push(TailscaleScreen(app)), key='tailscale', detail=ts_text,
                           detail_color=ts_color, desc=DESCRIPTIONS['tailscale']))
         if st.get('wifi') == '1':
@@ -374,6 +381,95 @@ class SettingsScreen(ListScreen):
             draw_text(surf, 'Address: %s' % self.ts['ip'], (rect.x, y), 30, TEXT, max_width=rect.width)
         elif it.key == 'quiet' and self.restart_needed():
             draw_wrapped(surf, 'Restart the Pi to apply this change.', (rect.x, y), rect.width, 30, WARN)
+
+
+# ---------------------------------------------------------------------------
+# VirtualHere
+# ---------------------------------------------------------------------------
+class VirtualHereScreen(ListScreen):
+    title = 'VirtualHere'
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.status = None
+        self.ts = None
+        self.loading = False
+
+    def enter(self):
+        self.load()
+
+    def load(self):
+        if self.loading:
+            return
+        self.loading = True
+        app = self.app
+        app.run_task(lambda: (app.settings.status(), app.settings.tailscale_status()), self._loaded)
+
+    def _loaded(self, res, err):
+        self.loading = False
+        if err:
+            self.app.message("Couldn't read the VirtualHere settings", str(err))
+            self.status, self.ts = {}, {}
+        else:
+            self.status, self.ts = res
+        self.refresh()
+
+    def refresh(self):
+        st = self.status
+        if st is None:
+            self.list.set_items([Item('Loading…', selectable=False, spinner=True)])
+            return
+        self.list.set_items([
+            Item('Send USB to PC only while streaming',
+                 lambda: self._set('usb-handoff', 'usb_handoff', st.get('usb_handoff') != '1',
+                                   'Send USB to PC only while streaming'),
+                 key='usb', toggle=st.get('usb_handoff') == '1', desc=DESCRIPTIONS['usb']),
+            Item('Use VirtualHere over Tailscale', self._tailscale, key='tailscale',
+                 toggle=st.get('vh_tailscale') == '1', desc=DESCRIPTIONS['vh_tailscale']),
+        ])
+
+    def _set(self, name, key, on, label):
+        app = self.app
+
+        def done(res, err):
+            if err:
+                app.message("Couldn't change that", str(err))
+            else:
+                self.status[key] = '1' if on else '0'
+                app.show_toast('%s: %s' % (label, 'On' if on else 'Off'), GOOD)
+            self.load()
+        app.run_task(lambda: app.settings.set(name, on_off(on)), done,
+                     busy='Turning on…' if on else 'Turning off…')
+
+    def _tailscale(self):
+        app = self.app
+        st = self.status or {}
+        if st.get('vh_tailscale') == '1':
+            self._set('virtualhere-tailscale', 'vh_tailscale', False, 'VirtualHere over Tailscale')
+        elif st.get('tailscale') != '1':
+            app.message("Tailscale isn't installed", 'Install Tailscale and sign in first, in Settings > Tailscale.')
+        else:
+            app.confirm('Use VirtualHere over Tailscale?',
+                        "This isn't recommended: it adds input lag and stutter, and away from home controllers work "
+                        "better through Moonlight. Your PC's VirtualHere client also needs the Pi's Tailscale "
+                        "address.", 'Turn on',
+                        lambda: self._set('virtualhere-tailscale', 'vh_tailscale', True, 'VirtualHere over Tailscale'))
+
+    def draw_panel(self, surf, rect):
+        it = self.list.selected
+        if not it:
+            return
+        st = self.status or {}
+        y = draw_wrapped(surf, it.label, (rect.x, rect.y), rect.width, 36, TEXT, bold=True) + 12
+        y = draw_wrapped(surf, it.desc, (rect.x, y), rect.width, 29, DIM, line_gap=6) + 20
+        if it.key == 'tailscale' and st.get('vh_tailscale') == '1':
+            ip = (self.ts or {}).get('ip') or "the Pi's Tailscale address"
+            draw_wrapped(surf, 'On your PC, in the VirtualHere client: right-click USB Hubs, choose Specify Hubs, and '
+                         'add %s:%s' % (ip, st.get('vh_port') or '7575'), (rect.x, y), rect.width, 29, TEXT,
+                         line_gap=6)
+        elif it.key == 'usb':
+            draw_wrapped(surf, 'Choose which devices go to your PC in the VirtualHere client on the PC: right-click a '
+                         'device and choose Auto-Use.', (rect.x, y), rect.width, 28, FAINT, line_gap=6)
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +575,8 @@ class TailscaleScreen(ListScreen):
                          'too, signed in to the same account.', (rect.x, y), rect.width, 28, DIM, line_gap=6) + 14
         y = draw_wrapped(surf, "Away from home, add your PC in Moonlight using its Tailscale address (100.x.x.x), "
                          'and lower the bitrate.', (rect.x, y), rect.width, 28, DIM, line_gap=6) + 14
-        draw_wrapped(surf, 'USB sharing (VirtualHere) only works at home.', (rect.x, y), rect.width, 28, FAINT)
+        draw_wrapped(surf, 'VirtualHere only works at home, unless it\'s allowed in Settings > VirtualHere (not '
+                     'recommended).', (rect.x, y), rect.width, 28, FAINT)
 
 
 class TailscaleLoginScreen(Screen):
@@ -970,20 +1067,21 @@ class QuickSetup:
                                   options=[('play', 'Play a speaker test', '', ''),
                                            ('next', 'Continue', '', '')], **kw)
         if name == 'quit':
-            return QuickSetupPage(self, i, heading='Quit the game on your PC when the Pi shuts down?',
-                                  intro='When the Pi is switched off, for example with its power button, the game '
-                                        'keeps running on your PC, and the PC can stay stuck on the stream.',
-                                  options=[('on', 'Yes, quit the game', 'Save before switching the Pi off: the game '
-                                            'closes without saving.', 'Recommended'),
-                                           ('off', 'No, leave it running', 'Quit the game on the PC yourself.', '')],
+            return QuickSetupPage(self, i, heading='End the stream on your PC when the Pi shuts down?',
+                                  intro='When the Pi is switched off, for example with its power button, the stream '
+                                        'keeps running on your PC, and the PC can stay stuck on it.',
+                                  options=[('on', 'Yes, end the stream on shutdown', 'The game you\'re streaming '
+                                            'closes, so save before switching the Pi off.', 'Recommended'),
+                                           ('off', 'No, leave the stream running', 'End it on the PC yourself.', '')],
                                   initial=on_off(st.get('quit_on_shutdown', '1') == '1'), **kw)
         if name == 'quiet':
             return QuickSetupPage(self, i, heading='Hide boot messages?',
                                   intro='While the Pi starts, it can show a screen full of text, or nothing until '
                                         'Moonlight appears.',
-                                  options=[('on', 'Hide them', 'A cleaner start. Takes effect after a restart.',
-                                            'Recommended'),
-                                           ('off', 'Show them', 'Useful if something goes wrong while starting.', '')],
+                                  options=[('on', 'Hide boot messages', 'A cleaner start. Takes effect after a '
+                                            'restart.', 'Recommended'),
+                                           ('off', 'Show boot messages', 'Useful if something goes wrong while '
+                                            'starting.', '')],
                                   initial=on_off(st.get('quiet_boot', '1') == '1'), **kw)
         if name == 'powersave':
             return QuickSetupPage(self, i, heading='Turn off Wi-Fi power saving?',
@@ -993,13 +1091,13 @@ class QuickSetup:
                                            ('on', 'Leave it on', 'Uses slightly less power.', '')],
                                   initial=on_off(st.get('wifi_powersave') == '1'), **kw)
         if name == 'usb':
-            return QuickSetupPage(self, i, heading='When should USB devices go to your PC?',
-                                  intro='VirtualHere shares USB devices plugged into the Pi, like a wired controller, '
-                                        'with your PC.',
-                                  options=[('on', 'Only while streaming', "A controller works here and in Moonlight "
-                                            "between streams, and moves to your PC while you're streaming.",
-                                            'Recommended'),
-                                           ('off', 'All the time', 'Devices stay on the PC, even between streams.', '')],
+            return QuickSetupPage(self, i, heading='When should VirtualHere send USB devices to your PC?',
+                                  intro='VirtualHere sends USB devices plugged into the Pi, like a wired controller, '
+                                        'to your PC as if they were plugged into it.',
+                                  options=[('on', 'Only while streaming', "Between streams they stay on the Pi, so a "
+                                            "controller works here and in Moonlight. While you're streaming, "
+                                            "they're on your PC.", 'Recommended'),
+                                           ('off', 'All the time', 'They stay on your PC, even between streams.', '')],
                                   initial=on_off(st.get('usb_handoff', '1') == '1'), **kw)
         restart = self.restart_needed()
         options = [('finish', 'Finish', '', '')]

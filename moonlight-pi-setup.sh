@@ -57,7 +57,7 @@ MENU_FILES=(moonlight_menu.py ui.py network.py bluetooth.py wifi_setup.py settin
 SETTINGS_HELPER="${LIB_DIR}/moonlight-settings"
 SUDOERS_FILE="/etc/sudoers.d/moonlight-pi-setup"
 ROOT_STATE_DIR="/var/lib/moonlight-pi-setup"
-MENU_PACKAGES=(python3-pygame python3-dbus python3-gi python3-qrcode)
+MENU_PACKAGES=(python3-pygame python3-dbus python3-gi python3-qrcode nftables)
 MENU_BASE_URL="https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/menu"
 PHONE_SERVICE_NAME="moonlight-wifi-setup.service"
 PHONE_SERVICE="/etc/systemd/system/${PHONE_SERVICE_NAME}"
@@ -84,6 +84,7 @@ OPT_QUIET_BOOT=1
 OPT_QUIT_ON_SHUTDOWN=1
 OPT_WIFI_POWERSAVE_OFF=1
 OPT_USB_HANDOFF=1
+OPT_VH_TAILSCALE=0     # VirtualHere over Tailscale: not recommended
 WIFI_COUNTRY=""
 OPT_TAILSCALE=0
 OPT_VIRTUALHERE=0
@@ -496,6 +497,7 @@ load_settings() {
       wifi_powersave) OPT_WIFI_POWERSAVE_OFF=$(( value == 1 ? 0 : 1 )) ;;
       virtualhere) vh=$value ;;
       usb_handoff) OPT_USB_HANDOFF=$value ;;
+      vh_tailscale) OPT_VH_TAILSCALE=$value ;;
     esac
   done < <(as_user bash "${MENU_SRC}/moonlight-settings.sh" status 2>/dev/null || true)
   # VirtualHere installed now for the first time: use the recommended setting.
@@ -560,11 +562,12 @@ ask_questions() {
     info "Your settings are kept (change them on the TV, in the menu's Settings):"
   fi
   info "  Speakers:           ${AUDIO_MODE}"
-  info "  Quit game on PC:    $( (( OPT_QUIT_ON_SHUTDOWN )) && echo "yes, when the Pi shuts down" || echo no)"
+  info "  End stream on PC:   $( (( OPT_QUIT_ON_SHUTDOWN )) && echo "yes, when the Pi shuts down" || echo no)"
   info "  Hide boot messages: $( (( OPT_QUIET_BOOT )) && echo yes || echo no)"
   info "  Wi-Fi power saving: $( (( OPT_WIFI_POWERSAVE_OFF )) && echo off || echo on)"
   if (( OPT_VIRTUALHERE )) || virtualhere_installed; then
-    info "  Share USB devices:  $( (( OPT_USB_HANDOFF )) && echo "only while streaming" || echo "all the time")"
+    info "  VirtualHere:        sends USB devices to the PC $( (( OPT_USB_HANDOFF )) && echo "only while streaming" || echo "all the time")"
+    info "                      $( (( OPT_VH_TAILSCALE )) && echo "and works over Tailscale" || echo "(at home only, not over Tailscale)")"
   fi
   echo
   ask_yes_no "    Go ahead?" y || die "Cancelled. Nothing was changed."
@@ -796,10 +799,10 @@ setup_quiet_boot() {
 }
 
 setup_quit_on_shutdown() {
-  step "Setting up 'quit game on shutdown'"
+  step "Setting up 'end stream on shutdown'"
   if (( OPT_QUIT_ON_SHUTDOWN )); then
     helper quit-on-shutdown on
-    info "This closes the game, so save before switching the Pi off."
+    info "This closes the game you're streaming, so save before switching the Pi off."
     info "What happened at the last shutdown: ${STATE_DIR}/quit-on-shutdown.log"
   else
     helper quit-on-shutdown off
@@ -841,17 +844,18 @@ install_virtualhere() {
   fi
 }
 
-# Share USB devices with the PC only while streaming (VirtualHere).
+# VirtualHere: send USB devices to the PC only while streaming, and keep it off
+# Tailscale unless that's been turned on.
 setup_usb_handoff() {
   virtualhere_installed || return 0
+  step "Setting up VirtualHere"
+  helper virtualhere-tailscale "$( (( OPT_VH_TAILSCALE )) && echo on || echo off)"
   if (( OPT_USB_HANDOFF )); then
-    step "Sharing USB devices with your PC only while streaming"
     helper usb-handoff on
     info "During a stream the controller is on the PC, so Moonlight's controller shortcut"
     info "can't end the stream. Quit the game or app on the PC instead (for example, exit"
     info "Steam Big Picture), or press Ctrl+Alt+Shift+Q on a keyboard plugged into the Pi."
   else
-    step "Sharing USB devices with your PC all the time"
     helper usb-handoff off
   fi
 }
@@ -1128,6 +1132,9 @@ do_uninstall() {
   sudo bash "$h" quiet-boot off | sed 's/^/    /'
   if [[ -f $QUIT_SERVICE || -f $QUIT_HELPER ]]; then
     sudo bash "$h" quit-on-shutdown off | sed 's/^/    /'
+  fi
+  if [[ -f /etc/systemd/system/moonlight-virtualhere-tailscale.service ]]; then
+    sudo bash "$h" virtualhere-tailscale on > /dev/null
   fi
   if [[ -f $HANDOFF_SERVICE || -f $HANDOFF_HELPER ]]; then
     sudo bash "$h" usb-handoff off | sed 's/^/    /'

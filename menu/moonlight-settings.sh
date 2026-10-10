@@ -13,8 +13,9 @@
 #   speakers stereo|5.1|7.1      write ~/.asoundrc and set Moonlight's audio to match
 # Run as root (sudo):
 #   init USER                    remember which user the Pi is set up for
-#   quit-on-shutdown on|off      quit the game on the PC when the Pi shuts down
-#   usb-handoff on|off           share USB devices only while streaming (VirtualHere)
+#   quit-on-shutdown on|off      end the stream on the PC when the Pi shuts down
+#   usb-handoff on|off           VirtualHere sends USB devices to the PC only while streaming
+#   virtualhere-tailscale on|off allow VirtualHere over Tailscale (off: blocked)
 #   quiet-boot on|off            hide boot messages (after a restart)
 #   wifi-powersave on|off        Wi-Fi power saving
 #   wifi-country XX              Wi-Fi country (two letters)
@@ -44,6 +45,9 @@ VH_CONFIG="/usr/local/etc/virtualhere/config.ini"
 HANDOFF_HELPER="/usr/local/bin/moonlight-usb-handoff"
 HANDOFF_SERVICE_NAME="moonlight-usb-handoff.service"
 HANDOFF_SERVICE="/etc/systemd/system/${HANDOFF_SERVICE_NAME}"
+VH_TS_SERVICE_NAME="moonlight-virtualhere-tailscale.service"
+VH_TS_SERVICE="/etc/systemd/system/${VH_TS_SERVICE_NAME}"
+VH_TS_RULES="${ROOT_STATE_DIR}/virtualhere-tailscale.nft"
 COUNTRIES="/usr/share/zoneinfo/iso3166.tab"
 
 MARK_BEGIN="# >>> moonlight-pi-setup >>>"
@@ -171,6 +175,8 @@ cmd_status() {
   say "quit_on_shutdown=$(service_enabled "$QUIT_SERVICE_NAME" && echo 1 || echo 0)"
   say "virtualhere=$(virtualhere_installed && echo 1 || echo 0)"
   say "usb_handoff=$(service_enabled "$HANDOFF_SERVICE_NAME" && echo 1 || echo 0)"
+  say "vh_tailscale=$([[ $(kv_get "$ROOT_STATE" vh_tailscale) == 1 ]] && echo 1 || echo 0)"
+  say "vh_port=$(vh_port)"
   say "quiet_boot=$(grep -qsF "$MARK_BEGIN" "$CONFIG_TXT" && echo 1 || echo 0)"
   say "wifi=$(compgen -G '/sys/class/net/*/wireless' > /dev/null && echo 1 || echo 0)"
   say "wifi_powersave=$([[ -f $NM_WIFI_CONF ]] && echo 0 || echo 1)"
@@ -380,7 +386,7 @@ quit_on_shutdown_off() {
     systemctl daemon-reload
     systemctl reset-failed "$QUIT_SERVICE_NAME" > /dev/null 2>&1 || true
   fi
-  say "The game on your PC will be left running when the Pi shuts down"
+  say "The stream on your PC will be left running when the Pi shuts down"
 }
 
 quit_on_shutdown_on() {
@@ -442,7 +448,7 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable --now "$QUIT_SERVICE_NAME" > /dev/null 2>&1
-  say "The running game on your PC will be quit when the Pi shuts down"
+  say "The stream on your PC will be ended when the Pi shuts down"
 }
 
 # ---------------------------------------------------------------------------
@@ -462,7 +468,7 @@ usb_handoff_off() {
     systemctl enable --now "$VH_SERVICE_NAME" > /dev/null 2>&1 || true
     root_set vh_disabled_by_handoff 0
   fi
-  say "USB devices are shared with your PC all the time"
+  say "VirtualHere sends USB devices to your PC all the time"
 }
 
 # Share USB devices with the PC only while streaming. A watcher starts the
@@ -559,7 +565,67 @@ EOF
   systemctl daemon-reload
   systemctl enable "$HANDOFF_SERVICE_NAME" > /dev/null 2>&1
   systemctl restart "$HANDOFF_SERVICE_NAME"
-  say "USB devices plugged into the Pi will move to your PC only while you're streaming"
+  say "VirtualHere sends USB devices to your PC only while you're streaming"
+}
+
+# ---------------------------------------------------------------------------
+# virtualhere-tailscale
+# ---------------------------------------------------------------------------
+# VirtualHere's server listens on every network, including Tailscale. Unless
+# this is turned on, a firewall rule blocks its port on the Tailscale network,
+# so only PCs at home can use the Pi's USB devices.
+vh_port() {
+  local port
+  port=$(grep -im1 '^TCPPort=' "$VH_CONFIG" 2> /dev/null | cut -d= -f2 | tr -dc '0-9' || true)
+  printf '%s' "${port:-7575}"
+}
+
+virtualhere_tailscale_off() {
+  command -v nft > /dev/null || die "nftables isn't installed (sudo apt install nftables)."
+  install -d -m 755 "$ROOT_STATE_DIR"
+  cat > "$VH_TS_RULES" <<EOF
+# Installed by moonlight-pi-setup: keep VirtualHere off the Tailscale network.
+table inet moonlight_virtualhere
+delete table inet moonlight_virtualhere
+table inet moonlight_virtualhere {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    iifname "tailscale0" tcp dport $(vh_port) drop
+  }
+}
+EOF
+  cat > "$VH_TS_SERVICE" <<EOF
+# Installed by moonlight-pi-setup.
+[Unit]
+Description=Keep VirtualHere off the Tailscale network
+Before=tailscaled.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$(command -v nft) -f ${VH_TS_RULES}
+ExecStop=$(command -v nft) delete table inet moonlight_virtualhere
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable "$VH_TS_SERVICE_NAME" > /dev/null 2>&1
+  systemctl restart "$VH_TS_SERVICE_NAME"
+  root_set vh_tailscale 0
+  say "VirtualHere only works at home (not over Tailscale)"
+}
+
+virtualhere_tailscale_on() {
+  if [[ -f $VH_TS_SERVICE ]]; then
+    systemctl disable --now "$VH_TS_SERVICE_NAME" > /dev/null 2>&1 || true
+    rm -f "$VH_TS_SERVICE"
+    systemctl daemon-reload
+  fi
+  nft delete table inet moonlight_virtualhere 2> /dev/null || true
+  rm -f "$VH_TS_RULES"
+  root_set vh_tailscale 1
+  say "VirtualHere works over Tailscale too"
 }
 
 # ---------------------------------------------------------------------------
@@ -769,7 +835,7 @@ main() {
     status) cmd_status ;;
     speakers) cmd_speakers "$value" ;;
     init) require_root; lock; cmd_init "$value" ;;
-    quit-on-shutdown|usb-handoff|quiet-boot|wifi-powersave)
+    quit-on-shutdown|usb-handoff|virtualhere-tailscale|quiet-boot|wifi-powersave)
       require_root
       [[ $value == on || $value == off ]] || die "Use: ${cmd} on|off"
       lock
