@@ -38,6 +38,8 @@ Have the TV (and receiver, if you use one) switched on while the script runs, so
 |---|---|
 | **Lite:** Start Moonlight automatically when the Pi boots (recommended) | Yes |
 | **Desktop:** Boot straight into Moonlight instead of the desktop (recommended) | Yes |
+| **With auto-start:** Show the controller and Wi-Fi menu when Moonlight closes (recommended) | Yes |
+| **With the menu, only if the Pi doesn't know yet:** Which country you're in (two letters, for Wi-Fi channels) | — |
 | Speaker setup: Stereo, 5.1 or 7.1 (not asked if you keep the desktop, see below) | Stereo |
 | Hide boot messages (recommended) | Yes |
 | Quit the running game on your PC when the Pi shuts down (recommended) | Yes |
@@ -61,6 +63,7 @@ When you re-run the script, the defaults are the answers you gave last time, so 
 | Sets `AUDIODEV=default` and `SDL_AUDIODRIVER=alsa` | Stops Moonlight wrongly reporting that surround sound isn't supported, and makes it use the settings above |
 | Writes `/etc/sysctl.d/90-moonlight-pi-setup.conf` (`net.core.rmem_max`) | Lets Moonlight use a larger network buffer, which helps at high bitrates |
 | Switches the Pi to boot to the console with auto-login, and adds a launch loop to `~/.bash_profile` | Boots straight into Moonlight, and restarts it if it closes. How the Pi booted before (console or desktop) is remembered and restored on uninstall |
+| Optional: installs the TV menu (`python3-pygame` and friends, `/usr/local/lib/moonlight-pi-setup/menu`, `/usr/local/bin/moonlight-menu`), the `moonlight-wifi-setup` service, and a polkit rule (`/etc/polkit-1/rules.d/50-moonlight-pi-setup.rules`) | A menu on the TV for Bluetooth controllers, Wi-Fi and restarting, usable with a controller (see [The TV menu](#the-tv-menu)). The polkit rule lets your user change Wi-Fi, restart or shut down, and run phone setup without a password |
 | Optional: adds quiet-boot options to `/boot/firmware/cmdline.txt` and `config.txt` | Hides boot text and the splash screen |
 | Optional: installs `/usr/local/bin/moonlight-quit-all` and the `moonlight-quit-on-shutdown` service | Ends the game on your PC when the Pi is switched off (see below) |
 | Optional, on Wi-Fi: writes `/etc/NetworkManager/conf.d/90-moonlight-pi-setup-wifi.conf` (`wifi.powersave = 2`) | Wi-Fi power saving makes the Pi's Wi-Fi doze between packets, which causes stutter and lag spikes |
@@ -106,7 +109,37 @@ If you chose to boot straight into Moonlight, the Pi boots into Moonlight's host
 
 Press **Ctrl+Alt+Shift+S** during a stream to show the performance overlay, and **Ctrl+Alt+Shift+Q** (or Select+Start+L1+R1 on a controller) to end it.
 
-To get a command line on the TV, quit Moonlight and press any key within 5 seconds.
+To get a command line on the TV, quit Moonlight and choose **Command line** in the [TV menu](#the-tv-menu) (without the menu: press any key within 5 seconds of Moonlight closing).
+
+## The TV menu
+
+If you chose the menu, it opens on the TV whenever Moonlight closes. To get there from Moonlight's main screen (the list of PCs), press **B** (Circle on PlayStation) or **Esc**, and confirm quitting. It also opens by itself at boot if the Pi isn't connected to a network, or if no controller is connected or paired yet.
+
+It works with a controller (D-pad or left stick, A to select, B to go back), a keyboard (arrow keys, Enter, Esc) or a mouse.
+
+| Menu item | What it does |
+|---|---|
+| **Start Moonlight** | Back to Moonlight (or press Start/Options) |
+| **Controllers** | Pair a new Bluetooth controller, and connect, disconnect or forget paired ones. Shows battery levels where the controller reports them. Paired controllers reconnect by themselves when you switch them on |
+| **Wi-Fi & network** | Network status, Wi-Fi on/off, choose a Wi-Fi network (with an on-screen keyboard for the password), set up Wi-Fi from your phone, and saved networks |
+| **Restart or shut down** | Restarts or shuts down the Pi |
+| **Command line** | Leaves the menu for a text command line (needs a keyboard). Type `exit` to come back |
+
+**Pairing a controller:** choose **Controllers → Pair a new controller**, put the controller in pairing mode, and select it when it appears. On a DualSense or DualShock 4, hold **Create/Share + PS** until the light flashes. On an Xbox controller, switch it on and hold the small pair button on top until the Xbox button flashes quickly. If no controller is connected or paired at all, the menu pairs the first controller you put in pairing mode by itself, so you can set up a new Pi without a cable or keyboard.
+
+**Setting up Wi-Fi from your phone:** choose **Wi-Fi & network → Set up Wi-Fi from your phone** (it starts by itself when the Pi boots without a network). The Pi starts its own Wi-Fi network and the TV shows a QR code:
+
+1. Scan the code with your phone's camera to join the Pi's setup network.
+2. A setup page opens on your phone (if it doesn't, open `http://10.42.0.1`).
+3. Choose your Wi-Fi network, type its password, and tap Connect.
+
+The Pi joins your network and the TV shows when it's connected. If the password was wrong, the setup network comes back so you can try again. The setup network has its own password, shown on the TV, so only someone who can see the TV can use it, and it switches off after 15 minutes.
+
+Notes:
+
+- Bluetooth controllers always work through Moonlight on the Pi. They can't be moved to your PC with the [VirtualHere hand-off](#virtualhere-sharing-usb-devices-with-your-pc), because the Pi 5's built-in Bluetooth isn't a USB device. For full DualSense features (adaptive triggers, HD haptics), use a USB cable, or a USB Bluetooth adapter on the Pi that VirtualHere moves as a whole.
+- Enterprise Wi-Fi (networks that need a username as well as a password) isn't supported in the menu.
+- The menu's log is at `/tmp/moonlight-menu.log`. If the menu can't start, the Pi falls back to the plain "press any key for a command line" prompt and restarts Moonlight.
 
 ## Optional extras
 
@@ -183,6 +216,8 @@ It's safe to run again, and only changes what isn't set up yet. It doesn't choos
 
 - Moonlight: `/tmp/moonlight.log` (cleared on reboot)
 - Setup script runs: `~/.local/share/moonlight-pi-setup/`
+- TV menu: `/tmp/moonlight-menu.log` (cleared on reboot)
+- Phone Wi-Fi setup: `journalctl -u moonlight-wifi-setup --no-pager`
 
 **No sound, or surround not working**
 
@@ -215,7 +250,7 @@ Re-run the script. If it persists, check that `~/.config/moonlight-pi-setup/eglf
 ~/.local/share/moonlight-pi-setup/moonlight-pi-setup.sh --uninstall
 ```
 
-This removes the settings the script added, restores your original `~/.asoundrc` if you had one, puts back how the Pi originally booted (to the desktop, or to a console login on Lite), restores the boot options and Wi-Fi power saving, switches VirtualHere back to sharing all the time, and removes the quit-on-shutdown service (without quitting a game that's running at the time). It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
+This removes the settings the script added, restores your original `~/.asoundrc` if you had one, puts back how the Pi originally booted (to the desktop, or to a console login on Lite), restores the boot options and Wi-Fi power saving, switches VirtualHere back to sharing all the time, removes the TV menu, and removes the quit-on-shutdown service (without quitting a game that's running at the time). It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
 
 ## Known limitations
 
