@@ -50,7 +50,7 @@ class FakeNetwork:
             self.current = None
 
     def scan(self, rescan=True):
-        time.sleep(1.2)
+        time.sleep(float(os.environ.get('FAKE_SCAN_SECONDS', 1.2)))
         saved = {s['ssid'] for s in self.saved_list}
         nets = [dict(n, in_use=n['ssid'] == self.current, saved=n['ssid'] in saved) for n in self.visible]
         return sorted(nets, key=lambda n: (not n['in_use'], not n['saved'], -n['signal']))

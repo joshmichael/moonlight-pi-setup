@@ -67,11 +67,24 @@ def wrap(f, s, max_w):
     return lines
 
 
+_rendered = {}
+
+
+def render(s, size, color, bold=False):
+    """Rendered text, cached: the screen is redrawn often and most text doesn't change."""
+    key = (s, size, color, bold)
+    img = _rendered.get(key)
+    if img is None:
+        if len(_rendered) > 2000:
+            _rendered.clear()
+        img = _rendered[key] = font(size, bold).render(s, True, color)
+    return img
+
+
 def draw_text(surf, s, pos, size=38, color=TEXT, bold=False, anchor='topleft', max_width=None):
-    f = font(size, bold)
     if max_width:
-        s = ellipsize(f, s, max_width)
-    img = f.render(s, True, color)
+        s = ellipsize(font(size, bold), s, max_width)
+    img = render(s, size, color, bold)
     r = img.get_rect(**{anchor: pos})
     surf.blit(img, r)
     return r
@@ -82,7 +95,7 @@ def draw_wrapped(surf, s, pos, width, size=32, color=DIM, bold=False, line_gap=8
     f = font(size, bold)
     x, y = pos
     for line in wrap(f, s, width):
-        surf.blit(f.render(line, True, color), (x, y))
+        surf.blit(render(line, size, color, bold), (x, y))
         y += f.get_linesize() + line_gap
     return y
 
@@ -95,11 +108,48 @@ def dot(surf, color, center, r=10):
     pygame.draw.circle(surf, color, center, r)
 
 
+SPIN_PERIOD = 0.9     # seconds per turn
+_spinners = {}
+
+
+def _spinner_image(r, color, width):
+    """A 300-degree arc that fades from a solid round head to a clear tail,
+    drawn at 4x and scaled down so it's smooth."""
+    key = (r, color, width)
+    if key not in _spinners:
+        size = 2 * r + width + 4
+        k = 4
+        big = pygame.Surface((size * k, size * k), pygame.SRCALPHA)
+        c = size * k / 2
+        sweep = math.radians(300)
+        steps = 160
+        for i in range(steps + 1):                  # tail first, so the head is drawn on top
+            t = i / steps
+            a = -(1 - t) * sweep                    # head at angle 0, tail behind it
+            alpha = int(255 * t ** 1.4)
+            pygame.draw.circle(big, (*color[:3], alpha),
+                               (c + r * k * math.cos(a), c + r * k * math.sin(a)), width * k / 2)
+        _spinners[key] = pygame.transform.smoothscale(big, (size, size))
+    return _spinners[key]
+
+
 def spinner(surf, center, r=26, color=ACCENT, width=6):
-    start = (time.monotonic() * 5) % (2 * math.pi)
-    rect = pygame.Rect(0, 0, r * 2, r * 2)
-    rect.center = center
-    pygame.draw.arc(surf, color, rect, start, start + 4.2, width)
+    """A smoothly turning loading spinner (needs the screen redrawn every frame)."""
+    angle = -(time.monotonic() % SPIN_PERIOD) / SPIN_PERIOD * 360   # clockwise
+    img = pygame.transform.rotozoom(_spinner_image(r, color, width), angle, 1)
+    surf.blit(img, img.get_rect(center=center))
+
+
+_shades = {}
+
+
+def shade(surf, alpha):
+    """Darkens the whole screen (behind dialogs and the busy message)."""
+    if alpha not in _shades:
+        s = pygame.Surface((W, H), pygame.SRCALPHA)
+        s.fill((0, 0, 0, alpha))
+        _shades[alpha] = s
+    surf.blit(_shades[alpha], (0, 0))
 
 
 # ---------------------------------------------------------------------------
@@ -520,9 +570,7 @@ class Dialog:
         return None
 
     def draw(self, surf):
-        shade = pygame.Surface((W, H), pygame.SRCALPHA)
-        shade.fill((0, 0, 0, 170))
-        surf.blit(shade, (0, 0))
+        shade(surf, 170)
         box = pygame.Rect(0, 0, 1100, 0)
         lines = wrap(font(34), self.message, box.width - 128)
         box.height = 220 + len(lines) * 46 + 110
@@ -579,9 +627,8 @@ class KeyboardScreen(Screen):
     """Full-screen on-screen keyboard. Calls on_done(text) or on_done(None) if cancelled.
 
     With a real keyboard: type straight into the field (Backspace deletes), the
-    arrow keys move around the on-screen keys, and Enter presses the
-    highlighted one (for Show/Hide and Done)."""
-    animating = True
+    arrow keys move around the on-screen keys, Enter presses the highlighted
+    one (for Show/Hide and Done), and Esc goes back."""
 
     def __init__(self, app, title, prompt, on_done, secret=False, initial='', validate=None,
                  max_len=63):
@@ -600,7 +647,23 @@ class KeyboardScreen(Screen):
         self.error = ''
         self.row, self.col = 1, 0
         self.keys = []      # rows of (id, label, rect)
+        self.blink = None
         self._layout()
+
+    def tick(self):
+        """Redraw only when the cursor blinks (or a real Shift key changes)."""
+        state = (int(time.monotonic() * 2) % 2, self._held_shift())
+        changed = state != self.blink
+        self.blink = state
+        return changed
+
+    @staticmethod
+    def _held_shift():
+        """Shift held (or Caps Lock on) on a real keyboard."""
+        return bool(pygame.key.get_mods() & (pygame.KMOD_SHIFT | pygame.KMOD_CAPS))
+
+    def _upper(self):
+        return self.shift or self._held_shift()
 
     def enter(self):
         pygame.key.start_text_input()
@@ -622,8 +685,8 @@ class KeyboardScreen(Screen):
             x = (W - width) // 2
             row = []
             for ch in chars:
-                label = ch.upper() if (self.shift and ch.isalpha()) else ch
-                row.append((('char', label), label, pygame.Rect(x, y, unit, key_h)))
+                # The label is worked out when drawing, as Shift can change at any time.
+                row.append((('char', ch), ch, pygame.Rect(x, y, unit, key_h)))
                 x += unit + gap
             self.keys.append(row)
             y += key_h + gap
@@ -661,17 +724,15 @@ class KeyboardScreen(Screen):
     def _press(self, kid):
         self.error = ''
         if kid[0] == 'char':
-            self._insert(kid[1])
+            self._insert(kid[1].upper() if self._upper() else kid[1])
             if self.shift:
                 self.shift = False
-                self._layout()
         elif kid[0] == 'space':
             self._insert(' ')
         elif kid[0] == 'del':
             self._delete()
         elif kid[0] == 'shift':
             self.shift = not self.shift
-            self._layout()
         elif kid[0] == 'page':
             self.symbols = not self.symbols
             self._layout()
@@ -723,6 +784,8 @@ class KeyboardScreen(Screen):
             self._press(self.keys[self.row][self.col][0])
         elif action == 'backspace':                   # real keyboard
             self._delete()
+        elif action == 'escape':                      # real keyboard: straight back
+            self._cancel()
         elif isinstance(action, tuple) and action[0] == 'char':
             self._insert(action[1])
         else:
@@ -771,7 +834,7 @@ class KeyboardScreen(Screen):
 
     def hints(self):
         if self.app.style == 'keyboard':
-            return []           # typing on a real keyboard needs no hints
+            return [('B', 'Back')]      # typing needs no hints; Esc goes back
         controls = self.controls()
         hints = []
         for op, label in HINT_LABELS:
@@ -805,10 +868,13 @@ class KeyboardScreen(Screen):
             draw_text(surf, self.error, (MARGIN, field.bottom + 24), 32, BAD)
         else:
             draw_text(surf, '%d characters' % len(self.text), (MARGIN, field.bottom + 24), 28, FAINT)
+        upper = self._upper()
         for r, row in enumerate(self.keys):
             for c, (kid, label, rect) in enumerate(row):
                 selected = (r, c) == (self.row, self.col)
-                active = (kid[0] == 'shift' and self.shift)
+                active = kid[0] == 'shift' and (self.shift or self._held_shift())
+                if kid[0] == 'char' and upper:
+                    label = label.upper()
                 rrect(surf, ACCENT if selected else (ACCENT_SOFT if active else PANEL), rect, 14)
                 size = 40 if kid[0] == 'char' else 32
                 draw_text(surf, label, rect.center, size, WHITE if selected else TEXT,

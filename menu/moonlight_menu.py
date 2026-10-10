@@ -584,10 +584,12 @@ class App:
         pg.mouse.set_visible(False)
         on_keyboard = isinstance(self.top, KeyboardScreen) and not self.dialog
         if on_keyboard:
-            # Typing goes into the field; only the arrows, Enter and Backspace do
-            # anything else (move around the keys, press the highlighted key, delete).
+            # Typing goes into the field; only the arrows, Enter, Backspace and Esc
+            # do anything else (move around the keys, press the highlighted key,
+            # delete, go back).
             keys = {pg.K_UP: 'up', pg.K_DOWN: 'down', pg.K_LEFT: 'left', pg.K_RIGHT: 'right',
-                    pg.K_RETURN: 'enter', pg.K_KP_ENTER: 'enter', pg.K_BACKSPACE: 'backspace'}
+                    pg.K_RETURN: 'enter', pg.K_KP_ENTER: 'enter', pg.K_BACKSPACE: 'backspace',
+                    pg.K_ESCAPE: 'escape'}
             if e.key in keys:
                 self.dispatch(keys[e.key])
             elif e.unicode and e.unicode.isprintable():
@@ -646,9 +648,7 @@ class App:
         if self.dialog:
             self.dialog.draw(c)
         if self.busy:
-            shade = pg.Surface((W, ui.H), pg.SRCALPHA)
-            shade.fill((0, 0, 0, 185))
-            c.blit(shade, (0, 0))
+            ui.shade(c, 185)
             ui.spinner(c, (W // 2, ui.H // 2 - 50), 44, ACCENT, 9)
             draw_text(c, self.busy, (W // 2, ui.H // 2 + 50), 40, TEXT, anchor='center')
 
@@ -666,10 +666,18 @@ class App:
         threading.Thread(target=self._poll_loop, daemon=True).start()
         started = time.monotonic()
         autopair_checked = False
+        fps_log = [] if os.environ.get('MENU_DEBUG_FPS') else None   # logs the frame rate
+        clock = pg.time.Clock()
         try:
             while self.exit_code is None:
-                e = pg.event.wait(30 if self.animating else 250)
-                events = [e] + pg.event.get()
+                if self.animating:
+                    # 60 fps while something moves (spinners). Don't block waiting for
+                    # events as well: on top of drawing and the display's vsync, that
+                    # would miss every other frame.
+                    clock.tick(60)
+                    events = pg.event.get()
+                else:
+                    events = [pg.event.wait(250)] + pg.event.get()
                 for ev in events:
                     if ev.type != pg.NOEVENT:
                         self._event(ev)
@@ -692,6 +700,11 @@ class App:
                     self.draw()
                     self.present()
                     self.dirty = False
+                    if fps_log is not None:
+                        fps_log.append(time.monotonic())
+                        if fps_log[-1] - fps_log[0] >= 3:
+                            log.info('frames: %.1f per second', (len(fps_log) - 1) / (fps_log[-1] - fps_log[0]))
+                            del fps_log[:-1]
                 if self.shot_requested:
                     self.shot_requested = False
                     pg.image.save(self.canvas, SHOT_PATH)
@@ -742,6 +755,8 @@ class App:
         elif step.startswith('char:'):
             for ch in step[5:]:
                 self.dispatch(('char', ch))
+        elif step.startswith('mods:'):          # e.g. mods:shift, mods:none
+            self.pg.key.set_mods(self.pg.KMOD_LSHIFT if step[5:] == 'shift' else 0)
         elif step == 'quit':
             self.exit_code = 99
         else:
@@ -1320,7 +1335,11 @@ class SavedScreen(ListScreen):
 
 class PhoneSetupScreen(Screen):
     title = 'Set up Wi-Fi from your phone'
-    animating = True
+
+    @property
+    def animating(self):
+        """Only while the spinner shows (starting or connecting)."""
+        return not self.error and (self.status or {}).get('state') in (None, 'starting', 'connecting')
 
     def __init__(self, app):
         super().__init__(app)
