@@ -118,14 +118,18 @@ class PhoneSetup:
 # The app
 # ---------------------------------------------------------------------------
 def style_for(name):
+    """Button style for a controller: 'ps', 'xbox', 'switch' or 'steam'. Anything
+    else uses the Xbox style."""
     n = (name or '').lower()
     if any(w in n for w in ('ps3', 'ps4', 'ps5', 'dualsense', 'dualshock', 'sony', 'playstation')):
         return 'ps'
-    if any(w in n for w in ('xbox', 'x-box', 'microsoft')):
-        return 'xbox'
     if n == 'wireless controller':     # what Sony pads call themselves over Bluetooth
         return 'ps'
-    return 'generic'
+    if any(w in n for w in ('nintendo', 'switch', 'pro controller', 'joy-con', 'joycon')):
+        return 'switch'
+    if any(w in n for w in ('steam', 'valve')):
+        return 'steam'
+    return 'xbox'
 
 
 class App:
@@ -174,7 +178,8 @@ class App:
         self.controllers = {}          # joystick instance id -> (controller, name)
         self.joysticks = {}            # non-controller joysticks
         self.holds = {}
-        self.style = 'generic'
+        self.triggers = {}
+        self.style = args.style or 'xbox'
         self.exit_code = None
         self.dirty = True
         self.stopping = threading.Event()
@@ -368,7 +373,7 @@ class App:
     # -- actions ------------------------------------------------------------
     def online(self):
         st = self.net_status
-        return bool(st and st['state'].startswith('connected'))
+        return bool(st and st.get('online'))
 
     def start_moonlight(self):
         if self.net_status is not None and not self.online():
@@ -449,6 +454,8 @@ class App:
         self.controllers.pop(instance_id, None)
         for src in [s for s in self.holds if s[1] == instance_id]:
             self._release(src)
+        for key in [k for k in self.triggers if k[0] == instance_id]:
+            del self.triggers[key]
         self.top.refresh()
         self.dirty = True
 
@@ -471,8 +478,14 @@ class App:
                 self.style = style_for(self.controllers[e.instance_id][1])
                 self._pad_button(e.instance_id, e.button, t == pg.CONTROLLERBUTTONDOWN)
         elif t == pg.CONTROLLERAXISMOTION:
-            if e.instance_id in self.controllers and e.axis in (pg.CONTROLLER_AXIS_LEFTX, pg.CONTROLLER_AXIS_LEFTY):
-                self._axis(('axis', e.instance_id, e.axis), e.axis == pg.CONTROLLER_AXIS_LEFTY, e.value / 32768)
+            if e.instance_id not in self.controllers:
+                return
+            if e.axis in (pg.CONTROLLER_AXIS_LEFTX, pg.CONTROLLER_AXIS_LEFTY):
+                style = style_for(self.controllers[e.instance_id][1])
+                self._axis(('axis', e.instance_id, e.axis), e.axis == pg.CONTROLLER_AXIS_LEFTY,
+                           e.value / 32768, style)
+            elif e.axis in (pg.CONTROLLER_AXIS_TRIGGERLEFT, pg.CONTROLLER_AXIS_TRIGGERRIGHT):
+                self._trigger(e.instance_id, e.axis, e.value / 32767)
         elif t in (pg.JOYBUTTONDOWN, pg.JOYHATMOTION, pg.JOYAXISMOTION, pg.JOYBUTTONUP):
             if e.instance_id in self.joysticks:
                 self._generic_joystick(e)
@@ -509,8 +522,9 @@ class App:
                 pg.CONTROLLER_BUTTON_DPAD_LEFT: 'left', pg.CONTROLLER_BUTTON_DPAD_RIGHT: 'right'}
         actions = {pg.CONTROLLER_BUTTON_A: 'select', pg.CONTROLLER_BUTTON_B: 'back',
                    pg.CONTROLLER_BUTTON_X: 'x', pg.CONTROLLER_BUTTON_Y: 'y',
-                   pg.CONTROLLER_BUTTON_START: 'start', pg.CONTROLLER_BUTTON_BACK: 'back',
-                   pg.CONTROLLER_BUTTON_LEFTSHOULDER: 'lb', pg.CONTROLLER_BUTTON_RIGHTSHOULDER: 'rb'}
+                   pg.CONTROLLER_BUTTON_START: 'start', pg.CONTROLLER_BUTTON_BACK: 'view',
+                   pg.CONTROLLER_BUTTON_LEFTSHOULDER: 'lb', pg.CONTROLLER_BUTTON_RIGHTSHOULDER: 'rb',
+                   pg.CONTROLLER_BUTTON_LEFTSTICK: 'ls'}
         if button in dirs:
             src = ('btn', jid, button)
             if down:
@@ -520,15 +534,28 @@ class App:
         elif down and button in actions:
             self.dispatch(actions[button])
 
-    def _axis(self, src, vertical, v):
+    def _axis(self, src, vertical, v, style='xbox'):
         if abs(v) > 0.6:
             action = ('down' if v > 0 else 'up') if vertical else ('right' if v > 0 else 'left')
             if self.holds.get(src, (None,))[0] != action:
                 self._controller_input()
+                self.style = style
                 self._release(src)
                 self._press_dir(src, action)
         elif abs(v) < 0.35:
             self._release(src)
+
+    def _trigger(self, jid, axis, v):
+        """Triggers are analogue; treat a firm press as a button press."""
+        key = (jid, axis)
+        pressed = self.triggers.get(key, False)
+        if v > 0.6 and not pressed:
+            self.triggers[key] = True
+            self._controller_input()
+            self.style = style_for(self.controllers[jid][1])
+            self.dispatch('lt' if axis == self.pg.CONTROLLER_AXIS_TRIGGERLEFT else 'rt')
+        elif v < 0.3 and pressed:
+            self.triggers[key] = False
 
     def _generic_joystick(self, e):
         pg = self.pg
@@ -538,6 +565,7 @@ class App:
             for axis, val, neg, pos in (('hx', x, 'left', 'right'), ('hy', -y, 'up', 'down')):
                 src = ('hat', jid, axis)
                 if val:
+                    self.style = 'xbox'
                     self._press_dir(src, pos if val > 0 else neg)
                 else:
                     self._release(src)
@@ -545,6 +573,7 @@ class App:
             self._axis(('jaxis', jid, e.axis), e.axis == 1, e.value)
         elif e.type == pg.JOYBUTTONDOWN:
             self._controller_input()
+            self.style = 'xbox'
             action = {0: 'select', 1: 'back', 2: 'x', 3: 'y'}.get(e.button, 'start' if e.button >= 7 else None)
             if action:
                 self.dispatch(action)
@@ -553,8 +582,16 @@ class App:
         pg = self.pg
         self.style = 'keyboard'
         pg.mouse.set_visible(False)
-        if isinstance(self.top, KeyboardScreen) and not self.dialog and e.unicode and e.unicode.isprintable():
-            self.dispatch(('char', e.unicode))
+        on_keyboard = isinstance(self.top, KeyboardScreen) and not self.dialog
+        if on_keyboard:
+            # Typing goes into the field; only the arrows, Enter and Backspace do
+            # anything else (move around the keys, press the highlighted key, delete).
+            keys = {pg.K_UP: 'up', pg.K_DOWN: 'down', pg.K_LEFT: 'left', pg.K_RIGHT: 'right',
+                    pg.K_RETURN: 'enter', pg.K_KP_ENTER: 'enter', pg.K_BACKSPACE: 'backspace'}
+            if e.key in keys:
+                self.dispatch(keys[e.key])
+            elif e.unicode and e.unicode.isprintable():
+                self.dispatch(('char', e.unicode))
             return
         keys = {pg.K_UP: 'up', pg.K_DOWN: 'down', pg.K_LEFT: 'left', pg.K_RIGHT: 'right',
                 pg.K_RETURN: 'enter', pg.K_KP_ENTER: 'enter', pg.K_ESCAPE: 'escape',
@@ -583,11 +620,14 @@ class App:
         c = self.canvas
         c.fill(BG)
         top = self.top
-        draw_text(c, top.title, (MARGIN, HEADER_Y), 60, TEXT, bold=True, max_width=W - 2 * MARGIN - 760)
         color, label = self.header_status()
         r = draw_text(c, time.strftime('%H:%M'), (W - MARGIN, HEADER_Y + 36), 36, DIM, anchor='midright')
         r = draw_text(c, label, (r.left - 48, HEADER_Y + 36), 32, TEXT, anchor='midright', max_width=600)
         dot(c, color, (r.left - 22, r.centery), 9)
+        # Long titles get a smaller font before they get cut short.
+        room = r.left - 22 - 48 - MARGIN
+        size = next((s for s in (60, 54, 48) if ui.font(s, True).size(top.title)[0] <= room), 48)
+        draw_text(c, top.title, (MARGIN, HEADER_Y + 36), size, TEXT, bold=True, anchor='midleft', max_width=room)
         top.draw(c)
         pg.draw.line(c, PANEL, (MARGIN, FOOTER_Y - 34), (W - MARGIN, FOOTER_Y - 34), 2)
         hints = [('A', 'OK'), ('B', 'Cancel')] if self.dialog else top.hints()
@@ -815,12 +855,17 @@ def network_lines(st, short=False):
             lines.append((FAINT, 'Wi-Fi: off'))
         else:
             lines.append((WARN, 'Wi-Fi: not connected'))
-    if not lines or not st['state'].startswith('connected'):
+    if not st.get('online'):
         lines.append((BAD, 'Not connected to a network'))
-    elif st['state'] != 'connected' and not short:
-        lines.append((WARN, 'No internet (home network only)'))
-    if st.get('tailscale') and not short:
-        lines.append((GOOD, 'Tailscale: %s' % st['tailscale']))
+        return lines
+    if not short:
+        internet = st.get('internet')
+        if internet in ('none', 'limited'):
+            lines.append((WARN, 'No internet (home network only)'))
+        elif internet == 'portal':
+            lines.append((WARN, 'This network needs you to sign in'))
+        if st.get('tailscale'):
+            lines.append((GOOD, 'Tailscale: %s' % st['tailscale']))
     return lines
 
 
@@ -1443,6 +1488,8 @@ def main():
     p.add_argument('--fake', action='store_true', help='use fake Wi-Fi/Bluetooth data (testing)')
     p.add_argument('--reason', choices=['offline', 'no-controller'], help='open as if for this reason (testing)')
     p.add_argument('--test-input', help='comma-separated actions to run headless (testing)')
+    p.add_argument('--style', choices=['ps', 'xbox', 'switch', 'steam', 'keyboard'],
+                   help='button style to start with (testing)')
     p.add_argument('--shots', default='.', help='where --test-input saves screenshots')
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s: %(message)s')

@@ -121,8 +121,36 @@ class Network:
             return 'unknown'
 
     def online(self):
-        """True when the Pi is on a network (internet not required, LAN is enough)."""
-        return self.state().startswith('connected')
+        """True when Ethernet or Wi-Fi is connected (internet not required, LAN is
+        enough). NetworkManager's overall state isn't used, because virtual
+        interfaces such as Tailscale's make it say "connected" with no network."""
+        try:
+            rows = nmcli_rows(['-f', 'TYPE,STATE,CONNECTION', 'device'])
+        except NetworkError:
+            return False
+        return any(typ in ('ethernet', 'wifi') and state == 'connected' and conn != HOTSPOT_NAME
+                   for typ, state, conn in rows)
+
+    def connectivity(self):
+        """'full', 'limited', 'portal', 'none' or 'unknown' (internet access, as
+        NetworkManager last checked it)."""
+        rc, out, _ = run(['nmcli', 'networking', 'connectivity'], 10)
+        return out.strip() if rc == 0 and out.strip() else 'unknown'
+
+    def tailscale_ip(self):
+        """The Pi's Tailscale address while Tailscale is up and online, else ''."""
+        import json
+        rc, out, _ = run(['tailscale', 'status', '--json'], 5)
+        if rc != 0:
+            return ''
+        try:
+            st = json.loads(out)
+        except ValueError:
+            return ''
+        me = st.get('Self') or {}
+        if st.get('BackendState') != 'Running' or not me.get('Online'):
+            return ''
+        return next((ip for ip in me.get('TailscaleIPs') or [] if '.' in ip), '')
 
     def wait_startup(self, timeout):
         run(['nm-online', '-s', '-q', '-t', str(int(timeout))], timeout + 5)
@@ -134,7 +162,8 @@ class Network:
         return out.strip().split(' | ')[0].split('/')[0]
 
     def status(self):
-        st = {'state': self.state(), 'ethernet': None, 'wifi': None, 'tailscale': '', 'hotspot': False}
+        st = {'state': self.state(), 'ethernet': None, 'wifi': None, 'tailscale': '', 'hotspot': False,
+              'online': False, 'internet': 'unknown'}
         try:
             devices = nmcli_rows(['-f', 'DEVICE,TYPE,STATE,CONNECTION', 'device'])
         except NetworkError:
@@ -162,9 +191,10 @@ class Network:
                 pass
             if not w['ssid']:
                 w['ssid'] = w['connection']
-        rc, out, _ = run(['tailscale', 'ip', '-4'], 3)
-        if rc == 0:
-            st['tailscale'] = out.strip().splitlines()[0] if out.strip() else ''
+        st['online'] = bool((st['ethernet'] and st['ethernet']['connected']) or (w and w['connected']))
+        if st['online']:
+            st['internet'] = self.connectivity()
+            st['tailscale'] = self.tailscale_ip()
         return st
 
     def wifi_enabled(self):

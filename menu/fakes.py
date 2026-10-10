@@ -33,6 +33,7 @@ class FakeNetwork:
 
     def status(self):
         return {'state': self.state(), 'hotspot': False, 'tailscale': '100.64.0.7' if self.current else '',
+                'online': self.current is not None, 'internet': 'full' if self.current else 'unknown',
                 'ethernet': {'device': 'eth0', 'connected': False, 'ip': ''},
                 'wifi': {'device': 'wlan0', 'state': 'connected' if self.current else 'disconnected',
                          'connected': self.current is not None, 'connection': self.current or '',

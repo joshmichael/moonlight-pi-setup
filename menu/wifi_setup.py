@@ -116,40 +116,65 @@ background:#6284ff;color:#fff}
 .err{background:#5a2424;border-radius:12px;padding:.8em 1em;color:#fff}
 .ok{background:#1f4a33;border-radius:12px;padding:.8em 1em;color:#fff}
 #otherbox{display:none}
+.nets{display:flex;flex-direction:column;gap:8px}
+.net{display:flex;align-items:center;gap:12px;margin:0;font-weight:400;padding:.85em 1em;border-radius:12px;
+background:#1a1e28;border:2px solid #1a1e28;cursor:pointer}
+.net input{accent-color:#6284ff;width:20px;height:20px;margin:0;flex:none}
+.net:has(input:checked){border-color:#6284ff;background:#20263a}
+.name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lock{width:14px;height:18px;fill:#98a0b1;flex:none}
+.bars{display:flex;align-items:flex-end;gap:3px;height:18px;flex:none}
+.bars i{display:block;width:5px;border-radius:1px;background:#3a4152}
+.bars i:nth-child(1){height:6px}.bars i:nth-child(2){height:10px}
+.bars i:nth-child(3){height:14px}.bars i:nth-child(4){height:18px}
+.b1 i:nth-child(-n+1),.b2 i:nth-child(-n+2),.b3 i:nth-child(-n+3),.b4 i:nth-child(-n+4){background:#eceff5}
 </style></head><body><main>
 %(body)s
 </main>
 <script>
-var s=document.getElementById('ssid'),o=document.getElementById('otherbox');
-function upd(){if(s&&o){o.style.display=s.value==='__other__'?'block':'none';}}
-if(s){s.addEventListener('change',upd);upd();}
+var o=document.getElementById('otherbox');
+function upd(){var c=document.querySelector('input[name=ssid]:checked');
+if(o){o.style.display=(c&&c.value==='__other__')?'block':'none';}}
+document.querySelectorAll('input[name=ssid]').forEach(function(r){r.addEventListener('change',upd);});upd();
 var sh=document.getElementById('show'),pw=document.getElementById('password');
 if(sh&&pw){sh.addEventListener('change',function(){pw.type=sh.checked?'text':'password';});}
 </script></body></html>"""
 
+LOCK_SVG = ('<svg class="lock" viewBox="0 0 14 18" aria-label="Password protected"><path d="M3 8V5.5a4 4 0 0 1 '
+            '8 0V8h-2V5.5a2 2 0 0 0-4 0V8z"/><rect x="0" y="7.5" width="14" height="10.5" rx="2.5"/></svg>')
+
+
+def signal_level(strength):
+    """0-4 bars, the same as the TV shows."""
+    return 0 if strength <= 0 else 1 + min(3, strength // 26)
+
 
 def form_body(networks, error):
-    opts = []
-    for n in networks:
-        lock = ' 🔒' if n['security'] else ''
-        opts.append('<option value="%s">%s%s (%d%%)</option>' % (
-            html.escape(n['ssid'], quote=True), html.escape(n['ssid']), lock, n['signal']))
-    opts.append('<option value="__other__">Other (hidden) network…</option>')
+    rows = []
+    for i, n in enumerate(networks):
+        rows.append('<label class="net"><input type="radio" name="ssid" value="%s"%s>'
+                    '<span class="name">%s</span>%s<span class="bars b%d" aria-label="Signal %d of 4">'
+                    '<i></i><i></i><i></i><i></i></span></label>' % (
+                        html.escape(n['ssid'], quote=True), ' checked' if i == 0 else '',
+                        html.escape(n['ssid']), LOCK_SVG if n['security'] else '',
+                        signal_level(n['signal']), signal_level(n['signal'])))
+    rows.append('<label class="net"><input type="radio" name="ssid" value="__other__"%s>'
+                '<span class="name">Other (hidden) network…</span></label>' % ('' if networks else ' checked'))
     err = '<p class="err">Couldn\'t connect: %s</p>' % html.escape(error) if error else ''
     return """<h1>Connect your Moonlight Pi to Wi-Fi</h1>
 %s<p>Choose the network the Pi should join, and type its password.</p>
 <form method="post" action="/connect">
-<label for="ssid">Network</label>
-<select id="ssid" name="ssid">%s</select>
+<label>Network</label>
+<div class="nets">%s</div>
 <div id="otherbox"><label for="other">Network name</label>
 <input type="text" id="other" name="other" autocapitalize="off" autocorrect="off" maxlength="32"></div>
 <label for="password">Password</label>
 <input type="password" id="password" name="password" autocapitalize="off" autocorrect="off" maxlength="63"
- placeholder="Leave empty if the network has no password">
+ placeholder="Leave empty if there is none">
 <div class="row"><input type="checkbox" id="show"><label for="show" style="margin:0;font-weight:400">Show
 password</label></div>
 <button type="submit">Connect</button>
-</form>""" % (err, ''.join(opts))
+</form>""" % (err, ''.join(rows))
 
 
 def connecting_body(ssid):
