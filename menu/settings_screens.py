@@ -122,6 +122,23 @@ class ChoiceScreen(ListScreen):
     def extra_items(self):
         return []
 
+    def long(self):
+        return len(self.list.items) > self.list.visible_count()
+
+    def handle(self, action):
+        # Long lists (countries) page up and down with left/right or the shoulder buttons.
+        if self.long() and action in ('left', 'lb', 'right', 'rb'):
+            d = -1 if action in ('left', 'lb') else 1
+            self.list.index = max(0, min(len(self.list.items) - 1, self.list.index + d * self.list.visible_count()))
+            self.list._clamp_scroll()
+        else:
+            super().handle(action)
+
+    def hints(self):
+        if self.long():
+            return [('A', 'Select'), (('LB', 'RB'), 'Page'), ('B', 'Back')]
+        return super().hints()
+
     def draw_panel(self, surf, rect):
         y = rect.y
         if self.step:
@@ -229,10 +246,10 @@ class CountryScreen(ListScreen):
                 app.message("Couldn't set the Wi-Fi country", str(err))
                 return
             app.show_toast('Wi-Fi country: %s' % settings.country_name(code), GOOD)
-            if self.on_changed:
-                self.on_changed()
             if app.top is self:
                 app.pop()
+            if self.on_changed:
+                self.on_changed()
         app.run_task(lambda: app.settings.set('wifi-country', code), done, busy='Setting the Wi-Fi country…')
 
     def draw_panel(self, surf, rect):
@@ -241,6 +258,8 @@ class CountryScreen(ListScreen):
         if self.current:
             draw_text(surf, 'Now: %s' % settings.country_name(self.current), (rect.x, y), 30, GOOD,
                       max_width=rect.width)
+        else:
+            draw_wrapped(surf, 'Wi-Fi stays off until you choose one.', (rect.x, y), rect.width, 30, WARN)
 
 
 # ---------------------------------------------------------------------------
@@ -320,8 +339,6 @@ class SettingsScreen(ListScreen):
         ]
         if st.get('virtualhere') == '1':
             items.append(Item('VirtualHere', lambda: app.push(VirtualHereScreen(app)), key='virtualhere',
-                              detail='USB to PC while streaming' if st.get('usb_handoff') == '1'
-                              else 'USB to PC all the time',
                               desc=DESCRIPTIONS['virtualhere']))
         items.append(Item('Tailscale', lambda: app.push(TailscaleScreen(app)), key='tailscale', detail=ts_text,
                           detail_color=ts_color, desc=DESCRIPTIONS['tailscale']))
@@ -961,6 +978,7 @@ class AboutScreen(Screen):
             rows.append(('Connect from a computer', 'ssh %s@%s.local' % (getpass.getuser(), host), TEXT))
         rows.append(('Setup version', info.get('version') or 'Unknown', TEXT))
         rows.append(('Moonlight', info.get('moonlight') or 'Not installed', TEXT))
+        rows.append(('Tailscale', info.get('tailscale_version') or 'Not installed', TEXT))
         temp = info.get('temp')
         if temp is None:
             rows.append(('Temperature', 'Unknown', DIM))
@@ -1032,7 +1050,11 @@ class QuickSetup:
         self.quiet_at_start = self.status.get('quiet_boot')
         st = self.app.net_status or {}
         on_ethernet = bool((st.get('ethernet') or {}).get('connected'))
-        self.pages = ['welcome', 'speakers', 'test', 'quit', 'quiet']
+        self.pages = ['welcome']
+        # Raspberry Pi OS keeps Wi-Fi off until it knows the country.
+        if self.status.get('wifi') == '1' and not self.status.get('wifi_country'):
+            self.pages.append('country')
+        self.pages += ['speakers', 'test', 'quit', 'quiet']
         if self.status.get('wifi') == '1' and not on_ethernet:
             self.pages.append('powersave')
         if self.status.get('virtualhere') == '1':
@@ -1055,6 +1077,14 @@ class QuickSetup:
                                   options=[('start', 'Start', '', ''),
                                            ('skip', 'Skip for now', 'You can go through it any time from Settings.',
                                             '')], **kw)
+        if name == 'country':
+            guess = settings.guess_country()
+            return QuickSetupPage(self, i, heading='Which country is the Pi in?',
+                                  intro='Wi-Fi uses different channels in each country, so the Pi keeps its Wi-Fi '
+                                        'switched off until it knows where it is.' +
+                                        (" The country of the Pi's time zone is highlighted." if guess else ''),
+                                  options=[(code, name, '', code) for code, name in settings.countries()],
+                                  initial=guess, **kw)
         if name == 'speakers':
             return QuickSetupPage(self, i, heading='Which speakers do you use?',
                                   intro="This sets the sound for streaming. Moonlight's own audio setting is "
@@ -1136,6 +1166,8 @@ class QuickSetup:
                 next_page()
             else:
                 self.finish()
+        elif name == 'country':
+            apply(lambda: app.settings.set('wifi-country', value), 'wifi_country', value)
         elif name == 'speakers':
             if value == st.get('speakers'):
                 next_page()

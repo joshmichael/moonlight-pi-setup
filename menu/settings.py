@@ -101,6 +101,13 @@ def countries():
     return sorted(out, key=lambda c: c[1].lower())
 
 
+def wifi_country():
+    """The Wi-Fi country set in cmdline.txt (by raspi-config), or '' if none.
+    Raspberry Pi OS keeps Wi-Fi switched off until it's set."""
+    m = re.search(r'cfg80211\.ieee80211_regdom=([A-Z]{2})', _read('/boot/firmware/cmdline.txt'))
+    return m.group(1) if m else ''
+
+
 def country_name(code):
     for c, name in countries():
         if c == code:
@@ -219,6 +226,9 @@ class Settings:
     def setup_version(self):
         return state_get('version')
 
+    def wifi_country(self):
+        return wifi_country()
+
     # -- Tailscale ---------------------------------------------------------------
     def tailscale_status(self):
         """{'installed', 'state', 'ip', 'name', 'tailnet', 'online'}. state is
@@ -278,6 +288,13 @@ class Settings:
                                                capture_output=True, text=True, timeout=10).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             info['moonlight'] = ''
+        info['tailscale_version'] = ''
+        if shutil.which('tailscale'):
+            try:
+                out = subprocess.run(['tailscale', 'version'], capture_output=True, text=True, timeout=10).stdout
+                info['tailscale_version'] = (out.splitlines() or [''])[0].strip()
+            except (OSError, subprocess.SubprocessError):
+                pass
         try:
             info['temp'] = int(_read('/sys/class/thermal/thermal_zone0/temp').strip()) / 1000
         except ValueError:

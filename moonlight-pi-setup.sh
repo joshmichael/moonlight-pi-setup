@@ -85,9 +85,6 @@ OPT_QUIT_ON_SHUTDOWN=1
 OPT_WIFI_POWERSAVE_OFF=1
 OPT_USB_HANDOFF=1
 OPT_VH_TAILSCALE=0     # VirtualHere over Tailscale: not recommended
-WIFI_COUNTRY=""
-OPT_TAILSCALE=0
-OPT_VIRTUALHERE=0
 SUDO_KEEPALIVE_PID=""
 
 # ---------------------------------------------------------------------------
@@ -411,18 +408,13 @@ preflight() {
   elif hdmi_connected HDMI-A-2; then
     HDMI_PORT=1
     ok "TV detected on HDMI 1"
-  elif (( UNATTENDED )); then
+  else
+    # Sound goes to whichever port has a screen connected when Moonlight starts,
+    # so this is only a fallback: the port used last time, or HDMI 0.
     HDMI_PORT=$(state_get hdmi_port)
     [[ $HDMI_PORT == 1 ]] || HDMI_PORT=0
-  else
-    warn "No TV detected on either HDMI port. Is the TV switched on?"
-    printf '    Which HDMI port will the TV use? 0 = next to the power socket, 1 = the other one [0]: '
-    local reply
-    read_tty reply
-    if [[ $reply == "1" ]]; then HDMI_PORT=1; else HDMI_PORT=0; fi
-  fi
-  if ! grep -q "vc4hdmi${HDMI_PORT}" /proc/asound/cards 2>/dev/null; then
-    warn "HDMI audio device vc4hdmi${HDMI_PORT} was not found. Audio may not work until the TV is connected and the Pi is rebooted."
+    warn "No TV detected on either HDMI port. That's fine: sound will go to whichever port"
+    warn "has a screen connected when Moonlight starts."
   fi
 
   # Network: ask the kernel which interface it would use to reach the internet,
@@ -507,54 +499,14 @@ load_settings() {
   return 0
 }
 
+# Nothing to ask: settings are chosen on the TV (Quick setup, then Settings).
+# This shows what will happen, and asks to go ahead.
 ask_questions() {
-  step "Setup options"
-  # Wi-Fi only works once the Pi knows which country's channels it may use.
-  if (( ! UNATTENDED )) && compgen -G '/sys/class/net/*/wireless' > /dev/null; then
-    local country=""
-    country=$(sudo raspi-config nonint get_wifi_country 2>/dev/null || true)
-    if [[ ! $country =~ ^[A-Z]{2}$ ]]; then
-      while true; do
-        printf '    Which country are you in? Wi-Fi needs this to use the right channels\n'
-        printf '    (two letters, for example GB, US, DE, AU): '
-        read_tty country
-        country=${country^^}
-        [[ $country =~ ^[A-Z]{2}$ ]] && break
-        echo "    Please enter a two-letter country code."
-      done
-      WIFI_COUNTRY=$country
-    fi
-  fi
-
-  if (( ! UNATTENDED )); then
-    if command -v tailscale > /dev/null 2>&1; then
-      info "Tailscale is already installed. Skipping that question."
-    elif ask_yes_no "    Install Tailscale, to stream when you're away from home?" n; then
-      OPT_TAILSCALE=1
-    fi
-    if virtualhere_installed; then
-      info "VirtualHere is already installed. Skipping that question."
-    elif ask_yes_no "    Install VirtualHere, to share USB devices plugged into the Pi with your PC?" n; then
-      OPT_VIRTUALHERE=1
-    fi
-  fi
-
   step "Summary"
   info "Moonlight:        install the official moonlight-qt package, and start it when the Pi boots"
   info "TV menu:          controllers, Wi-Fi, settings and power, when Moonlight closes"
-  if [[ -n $WIFI_COUNTRY ]]; then
-    info "Wi-Fi country:    ${WIFI_COUNTRY}"
-  fi
-  if command -v tailscale > /dev/null 2>&1; then
-    info "Tailscale:        already installed"
-  else
-    info "Tailscale:        $( (( OPT_TAILSCALE )) && echo yes || echo no)"
-  fi
-  if virtualhere_installed; then
-    info "VirtualHere:      already installed"
-  else
-    info "VirtualHere:      $( (( OPT_VIRTUALHERE )) && echo yes || echo no)"
-  fi
+  info "Tailscale:        $(command -v tailscale > /dev/null 2>&1 && echo "already installed" || echo "install (sign in later on the TV), to stream away from home")"
+  info "VirtualHere:      $(virtualhere_installed && echo "already installed" || echo "install, to send USB devices plugged into the Pi to your PC")"
   echo
   if (( FIRST_INSTALL )); then
     info "Settings (recommended for now; after the restart, Quick setup on the TV asks about them):"
@@ -565,9 +517,11 @@ ask_questions() {
   info "  End stream on PC:   $( (( OPT_QUIT_ON_SHUTDOWN )) && echo "yes, when the Pi shuts down" || echo no)"
   info "  Hide boot messages: $( (( OPT_QUIET_BOOT )) && echo yes || echo no)"
   info "  Wi-Fi power saving: $( (( OPT_WIFI_POWERSAVE_OFF )) && echo off || echo on)"
-  if (( OPT_VIRTUALHERE )) || virtualhere_installed; then
-    info "  VirtualHere:        sends USB devices to the PC $( (( OPT_USB_HANDOFF )) && echo "only while streaming" || echo "all the time")"
-    info "                      $( (( OPT_VH_TAILSCALE )) && echo "and works over Tailscale" || echo "(at home only, not over Tailscale)")"
+  info "  VirtualHere:        sends USB devices to the PC $( (( OPT_USB_HANDOFF )) && echo "only while streaming" || echo "all the time")"
+  info "                      $( (( OPT_VH_TAILSCALE )) && echo "and works over Tailscale" || echo "(at home only, not over Tailscale)")"
+  if (( FIRST_INSTALL )) && compgen -G '/sys/class/net/*/wireless' > /dev/null \
+      && ! grep -q 'cfg80211.ieee80211_regdom=[A-Z]' /boot/firmware/cmdline.txt 2> /dev/null; then
+    info "  Wi-Fi country:      not set yet (Quick setup asks for it; Wi-Fi stays off until then)"
   fi
   echo
   ask_yes_no "    Go ahead?" y || die "Cancelled. Nothing was changed."
@@ -809,31 +763,24 @@ setup_quit_on_shutdown() {
   fi
 }
 
+# Tailscale, to stream away from home. Signing in is done on the TV
+# (Settings > Tailscale shows a code to scan with a phone).
 install_tailscale() {
-  (( OPT_TAILSCALE )) || return 0
+  command -v tailscale > /dev/null 2>&1 && return 0
   step "Installing Tailscale"
   if ! helper tailscale install; then
     warn "Tailscale could not be installed. You can install it later on the TV (Settings > Tailscale)."
     return 0
   fi
   state_set tailscale_installed_by_script 1
-  echo
-  info "Starting Tailscale. It will show a link: open it on your phone or PC to sign in."
-  info "(Or sign in later on the TV: Settings > Tailscale shows a code to scan.)"
-  if sudo tailscale up; then
-    ok "Tailscale is connected. Install Tailscale on your gaming PC too, signed in to the same account."
-  else
-    warn "Tailscale didn't finish signing in. Sign in later on the TV, in Settings > Tailscale."
-  fi
+  ok "Tailscale installed. To stream away from home, sign in on the TV: Settings > Tailscale."
 }
 
+# VirtualHere's USB server. It does nothing until the VirtualHere client on the
+# PC uses a device.
 install_virtualhere() {
-  (( OPT_VIRTUALHERE )) || return 0
+  virtualhere_installed && return 0
   step "Installing the VirtualHere USB server"
-  if virtualhere_installed; then
-    info "VirtualHere is already installed."
-    return 0
-  fi
   info "Downloading VirtualHere's official installer. The free version shares one USB"
   info "device at a time. Sharing more needs a licence from virtualhere.com."
   if curl -fsSL "$VH_INSTALL_SCRIPT" | sudo sh; then
@@ -966,9 +913,6 @@ EOF
   sudo chmod 644 "$POLKIT_RULE"
   sudo systemctl daemon-reload
 
-  if [[ -n $WIFI_COUNTRY ]]; then
-    helper wifi-country "$WIFI_COUNTRY" || warn "Could not set the Wi-Fi country. Set it later on the TV, in Settings."
-  fi
   ok "When Moonlight closes, a menu for controllers, Wi-Fi, settings and power opens"
   info "To get to it from Moonlight's main screen, press B (or Esc) and confirm quitting."
 }
@@ -1020,23 +964,17 @@ finish_install() {
   info "                  the same speaker setup for the stream)"
   echo
   info "On your gaming PC you need a streaming host: Sunshine, Apollo or Vibepollo."
-  if (( OPT_VIRTUALHERE || OPT_TAILSCALE )) || virtualhere_installed || command -v tailscale > /dev/null 2>&1; then
-    echo
-    info "Then set up the PC to match: open PowerShell on the gaming PC and paste:"
-    info "  irm ${PC_SCRIPT_URL} | iex"
-    info "It sets up the VirtualHere client (downloads it, starts it with Windows, and"
-    info "makes it find the Pi quickly) and can install Tailscale."
-  fi
-  if (( OPT_TAILSCALE )); then
-    info "Tailscale: away from home, add the PC in Moonlight using its Tailscale"
-    info "address (100.x.x.x) and lower the bitrate."
-  fi
-  if (( OPT_VIRTUALHERE )) || virtualhere_installed; then
-    info "VirtualHere: in the client on your PC, right-click each device that should move"
-    info "to the PC and choose Auto-Use Device or Auto-Use Port."
-    if (( OPT_USB_HANDOFF )); then
-      info "The Pi's devices only appear there while you're streaming, so start a stream first."
-    fi
+  echo
+  info "Then set up the PC to match: open PowerShell on the gaming PC and paste:"
+  info "  irm ${PC_SCRIPT_URL} | iex"
+  info "It sets up the VirtualHere client (downloads it, starts it with Windows, and"
+  info "makes it find the Pi quickly) and can install Tailscale."
+  info "Tailscale: sign the Pi in on the TV (Settings > Tailscale). Away from home, add"
+  info "the PC in Moonlight using its Tailscale address (100.x.x.x) and lower the bitrate."
+  info "VirtualHere: in the client on your PC, right-click each device that should move"
+  info "to the PC and choose Auto-Use Device or Auto-Use Port."
+  if (( OPT_USB_HANDOFF )); then
+    info "The Pi's devices only appear there while you're streaming, so start a stream first."
   fi
   echo
   info "Moonlight log (after reboot): /tmp/moonlight.log"

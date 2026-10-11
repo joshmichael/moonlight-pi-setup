@@ -30,19 +30,11 @@ less moonlight-pi-setup.sh
 bash moonlight-pi-setup.sh
 ```
 
-Have the TV switched on while the script runs, so it can detect which HDMI port it's on.
+### What the script asks
 
-### Questions the script asks
+Nothing, apart from your password (if `sudo` needs it). It shows a summary and asks **Go ahead?** before changing anything, and offers to reboot at the end. It always installs Moonlight, the [TV menu](#the-tv-menu), [Tailscale](#tailscale-streaming-away-from-home) and [VirtualHere](#virtualhere-sharing-usb-devices-with-your-pc), and the Pi always boots straight into Moonlight.
 
-| Question | Default |
-|---|---|
-| **Only on a Pi with Wi-Fi, if it doesn't know yet:** Which country you're in (two letters, for Wi-Fi channels) | — |
-| Install Tailscale (not asked if it's already installed) | No |
-| Install VirtualHere (not asked if it's already installed) | No |
-
-You'll see a summary before anything is changed. At the end, the script offers to reboot. The Pi always boots straight into Moonlight, with the [TV menu](#the-tv-menu) when Moonlight closes.
-
-Everything else is chosen on the TV with a controller. After the restart, **Quick setup** asks about your speakers (with a speaker test), ending the stream on your PC when the Pi shuts down, hiding boot messages, Wi-Fi power saving (if you're on Wi-Fi) and when VirtualHere sends USB devices to your PC (if you have VirtualHere). Until then, the recommended settings are used. You can change any of them later in the menu's **Settings** (see [Settings and Quick setup](#settings-and-quick-setup)).
+Everything else is chosen on the TV with a controller. After the restart, **Quick setup** asks for the Wi-Fi country (only if it isn't set yet), your speakers (with a speaker test), whether to end the stream on your PC when the Pi shuts down, hiding boot messages, Wi-Fi power saving (if you're on Wi-Fi) and when VirtualHere sends USB devices to your PC. Until then, the recommended settings are used. You can change any of them later in the menu's **Settings** (see [Settings and Quick setup](#settings-and-quick-setup)).
 
 Running the script again updates or repairs the setup, and keeps your settings as they are.
 
@@ -62,7 +54,7 @@ Running the script again updates or repairs the setup, and keeps your settings a
 | Setting, on by default: adds quiet-boot options to `/boot/firmware/cmdline.txt` and `config.txt` | Hides boot text and the splash screen |
 | Setting, on by default: installs `/usr/local/bin/moonlight-quit-all` and the `moonlight-quit-on-shutdown` service | Ends the stream on your PC when the Pi is switched off (see below) |
 | Setting, on by default: writes `/etc/NetworkManager/conf.d/90-moonlight-pi-setup-wifi.conf` (`wifi.powersave = 2`) | Turns off Wi-Fi power saving, which can make the Pi's Wi-Fi doze between packets and cause stutter and lag spikes |
-| Optional: installs Tailscale and/or VirtualHere | See below |
+| Installs Tailscale and the VirtualHere USB server | See below. Tailscale does nothing until you sign the Pi in on the TV, and VirtualHere does nothing until the VirtualHere client on your PC uses a device |
 | Setting, on by default with VirtualHere: installs `/usr/local/bin/moonlight-usb-handoff` and the `moonlight-usb-handoff` service, and stops the VirtualHere server starting at boot | VirtualHere sends USB devices to your PC only while you're streaming (see below) |
 | With VirtualHere, unless VirtualHere over Tailscale is turned on: adds the `moonlight-virtualhere-tailscale` service, which loads a firewall rule (nftables) | Blocks VirtualHere on the Tailscale network, so it only works at home (see below) |
 
@@ -136,17 +128,17 @@ Notes:
 | **VirtualHere** | Only shown with VirtualHere. **Send USB to PC only while streaming** (on by default; see [Sending USB devices to the PC only while streaming](#sending-usb-devices-to-the-pc-only-while-streaming-recommended)), and **Use VirtualHere over Tailscale** (off by default, not recommended; see [VirtualHere over Tailscale](#virtualhere-over-tailscale-not-recommended)) |
 | **Tailscale** | Shows whether Tailscale is connected, and its address. Sign in by scanning a code with your phone, turn it off or on, or sign out. If Tailscale isn't installed, it can install it |
 | **Wi-Fi power saving** | Only shown on a Pi with Wi-Fi. Power saving can make Wi-Fi doze between packets, which can cause stutter and lag spikes when streaming. Off by default, and keeping it off is recommended |
-| **Wi-Fi country** | Which country's Wi-Fi channels the Pi uses |
+| **Wi-Fi country** | Which country's Wi-Fi channels the Pi uses. Raspberry Pi OS keeps Wi-Fi off until it's set, so Quick setup asks for it if it isn't set yet, and so does the menu before Wi-Fi setup from a phone |
 | **Hide boot messages** | Hides the text and the splash screen while the Pi starts. Takes effect after a restart, which the menu offers. On by default |
 | **Updates** | Checks for and installs new versions of Moonlight and Raspberry Pi OS (like `sudo apt full-upgrade`), and updates this setup from GitHub, keeping your settings |
-| **About this Pi** | Network and Tailscale addresses, the command to connect over SSH, versions, temperature, power supply warnings and free storage |
+| **About this Pi** | Network and Tailscale addresses, the command to connect over SSH, versions (this setup, Moonlight and Tailscale), temperature, power supply warnings and free storage |
 | **Run Quick setup again** | Goes through the first-time questions again |
 
 **Quick setup** runs the first time the Pi starts after installing. It asks one question per screen and applies each answer straight away. You can skip it, and run it again from Settings.
 
 **Updating this setup** downloads the latest script from GitHub and runs it again with your current settings, without asking any questions. Restart afterwards to finish.
 
-## Optional extras
+## Extras
 
 ### End the stream when the Pi is switched off
 
@@ -164,7 +156,7 @@ With this setting (on by default; Settings → **End stream on PC at shutdown**)
 [Tailscale](https://tailscale.com) connects the Pi and your PC over the internet without opening ports on your router.
 
 - Install Tailscale on your **gaming PC** too, signed in to the same account. The [PC setup script](#setting-up-the-gaming-pc) can do this.
-- On the Pi, **Settings → Tailscale** in the TV menu shows whether it's connected. It can sign the Pi in (scan the code on the TV with your phone), turn Tailscale off or on, and install it if you didn't during setup.
+- The setup installs Tailscale on the Pi. **Sign the Pi in on the TV:** Settings → **Tailscale** → **Sign in**, then scan the code with your phone. The same screen shows whether it's connected, and can turn Tailscale off or on, or sign out.
 
 **Before you take the Pi away from home**, do these once while you're still at home:
 
@@ -180,7 +172,7 @@ Away from home:
 
 ### VirtualHere (sharing USB devices with your PC)
 
-[VirtualHere](https://www.virtualhere.com) makes USB devices plugged into the Pi appear on your PC as if they were plugged in directly. A wired DualSense, for example, keeps its native haptics and adaptive triggers.
+[VirtualHere](https://www.virtualhere.com) makes USB devices plugged into the Pi appear on your PC as if they were plugged in directly. A wired DualSense, for example, keeps its native haptics and adaptive triggers. The setup installs the VirtualHere server on the Pi; to use it, set up the client on your PC.
 
 - Set up the **VirtualHere client** on your PC with the [PC setup script](#setting-up-the-gaming-pc), or by hand from https://www.virtualhere.com/usb_client_software
 - In the client, right-click each device that should move to the PC and choose **Auto-Use Device** (the device moves whichever USB port it's in) or **Auto-Use Port** (anything plugged into that port moves). Devices without Auto-Use stay with the Pi. Choosing **Stop using** on a device turns its Auto-Use off, so turn it back on afterwards.

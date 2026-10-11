@@ -184,7 +184,7 @@ class FakeSettings:
     def __init__(self):
         self.st = {'speakers': '5.1', 'quit_on_shutdown': '1', 'virtualhere': '1', 'usb_handoff': '1',
                    'vh_tailscale': '0', 'vh_port': '7575', 'quiet_boot': '1', 'wifi': '1', 'wifi_powersave': '0',
-                   'wifi_country': 'GB', 'tailscale': '1'}
+                   'wifi_country': '' if os.environ.get('FAKE_NO_COUNTRY') else 'GB', 'tailscale': '1'}
         self.pending = bool(os.environ.get('FAKE_QUICK_SETUP'))
         state = os.environ.get('FAKE_TAILSCALE', 'Running')
         self.ts = {'installed': state != 'none', 'state': state if state != 'none' else '',
@@ -222,6 +222,9 @@ class FakeSettings:
 
     def setup_version(self):
         return '1.8.0'
+
+    def wifi_country(self):
+        return self.st['wifi_country']
 
     def tailscale_status(self):
         time.sleep(0.1)
@@ -275,5 +278,6 @@ class FakeSettings:
         time.sleep(0.1)
         return {'hostname': 'moonlight-pi', 'version': '1.8.0', 'model': 'Raspberry Pi 5 Model B Rev 1.0',
                 'os': 'Debian GNU/Linux 13 (trixie)', 'kernel': '6.12.47+rpt-rpi-2712', 'moonlight': '6.2.0-1',
+                'tailscale_version': '1.104.1',
                 'temp': 61.4, 'throttled': int(os.environ.get('FAKE_THROTTLED', '0'), 16),
                 'disk_free': 21.3e9, 'disk_total': 31.1e9, 'uptime': 5 * 3600 + 17 * 60}

@@ -30,7 +30,7 @@ from ui import (W, MARGIN, CONTENT_Y, FOOTER_Y, HEADER_Y, BG, PANEL, ACCENT, TEX
                 GOOD, WARN, BAD, Item, ListScreen, Screen, Dialog, KeyboardScreen,
                 draw_text, draw_wrapped, rrect, dot)
 import settings  # noqa: E402
-from settings_screens import QuickSetup, SettingsScreen  # noqa: E402
+from settings_screens import CountryScreen, QuickSetup, SettingsScreen  # noqa: E402
 
 log = logging.getLogger('moonlight-menu')
 
@@ -688,7 +688,11 @@ class App:
             return
         if self.reason == 'offline' or (after_setup and self.net_status is not None and not self.online()):
             self.push(NetworkScreen(self))
-            self.push(PhoneSetupScreen(self))
+            if self.settings.wifi_country():
+                self.push(PhoneSetupScreen(self))
+            else:
+                # Raspberry Pi OS keeps Wi-Fi off until it knows the country.
+                self.push(CountryScreen(self, '', on_changed=lambda: self.push(PhoneSetupScreen(self))))
 
     def run(self):
         pg = self.pg
