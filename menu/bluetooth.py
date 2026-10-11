@@ -3,6 +3,7 @@ import glob
 import logging
 import os
 import threading
+import time
 
 log = logging.getLogger(__name__)
 
@@ -11,6 +12,8 @@ ADAPTER = 'org.bluez.Adapter1'
 DEVICE = 'org.bluez.Device1'
 BATTERY = 'org.bluez.Battery1'
 PROPS = 'org.freedesktop.DBus.Properties'
+OBJECT_MANAGER = 'org.freedesktop.DBus.ObjectManager'
+AGENT_MANAGER = 'org.bluez.AgentManager1'
 AGENT_PATH = '/org/moonlightpi/agent'
 
 GAMEPAD_WORDS = ('controller', 'gamepad', 'joystick', 'xbox', 'dualsense', 'dualshock',
@@ -71,9 +74,9 @@ def paired_gamepad_count():
     try:
         import dbus
         bus = dbus.SystemBus()
-        om = dbus.Interface(bus.get_object(BLUEZ, '/'), 'org.freedesktop.DBus.ObjectManager')
+        om = dbus.Interface(bus.get_object(BLUEZ, '/'), OBJECT_MANAGER)
         n = 0
-        for _, ifaces in om.GetManagedObjects().items():
+        for ifaces in om.GetManagedObjects().values():
             d = ifaces.get(DEVICE)
             if not d:
                 continue
@@ -86,9 +89,8 @@ def paired_gamepad_count():
         return 0
 
 
-def _device_dict(d, path=None):
+def _device_dict(d):
     return {
-        'path': str(path) if path else None,
         'address': str(d.get('Address', '')),
         'name': str(d.get('Alias') or d.get('Name') or d.get('Address', '')),
         'icon': str(d.get('Icon', '')),
@@ -97,7 +99,6 @@ def _device_dict(d, path=None):
         # Paired without a stored key: BlueZ refuses its controller connections
         # ("Rejected connection from !bonded device"). Older BlueZ has no Bonded.
         'bonded': bool(d.get('Bonded', d.get('Paired', False))),
-        'trusted': bool(d.get('Trusted', False)),
         'connected': bool(d.get('Connected', False)),
         'rssi': int(d['RSSI']) if 'RSSI' in d else None,
     }
@@ -161,16 +162,18 @@ class Bluetooth:
 
         self.agent = Agent(self.bus, AGENT_PATH)
         try:
-            mgr = dbus.Interface(self.bus.get_object(BLUEZ, '/org/bluez'), 'org.bluez.AgentManager1')
+            mgr = self._iface('/org/bluez', AGENT_MANAGER)
             mgr.RegisterAgent(AGENT_PATH, 'NoInputNoOutput')
             mgr.RequestDefaultAgent(AGENT_PATH)
         except dbus.exceptions.DBusException as e:
             log.warning('Could not register the pairing agent: %s', e)
 
     # -- helpers ------------------------------------------------------------
+    def _iface(self, path, name):
+        return self.dbus.Interface(self.bus.get_object(BLUEZ, path), name)
+
     def _objects(self):
-        om = self.dbus.Interface(self.bus.get_object(BLUEZ, '/'), 'org.freedesktop.DBus.ObjectManager')
-        return om.GetManagedObjects()
+        return self._iface('/', OBJECT_MANAGER).GetManagedObjects()
 
     def _adapter_path(self):
         for path, ifaces in self._objects().items():
@@ -179,10 +182,10 @@ class Bluetooth:
         return None
 
     def _props(self, path):
-        return self.dbus.Interface(self.bus.get_object(BLUEZ, path), PROPS)
+        return self._iface(path, PROPS)
 
     def _device(self, path):
-        return self.dbus.Interface(self.bus.get_object(BLUEZ, path), DEVICE)
+        return self._iface(path, DEVICE)
 
     def _path_for(self, address):
         for path, ifaces in self._objects().items():
@@ -210,11 +213,11 @@ class Bluetooth:
     def devices(self):
         """All known Bluetooth devices, as dicts."""
         result = []
-        for path, ifaces in self._objects().items():
+        for ifaces in self._objects().values():
             d = ifaces.get(DEVICE)
             if not d:
                 continue
-            dev = _device_dict(d, path)
+            dev = _device_dict(d)
             dev['gamepad'] = is_gamepad(dev)
             bat = ifaces.get(BATTERY)
             dev['battery'] = int(bat['Percentage']) if bat and 'Percentage' in bat else None
@@ -236,7 +239,7 @@ class Bluetooth:
         with self.lock:
             path = self.ensure_powered()
             self._set_pairable(True)
-            adapter = self.dbus.Interface(self.bus.get_object(BLUEZ, path), ADAPTER)
+            adapter = self._iface(path, ADAPTER)
             try:
                 adapter.SetDiscoveryFilter({'Transport': 'auto'})
             except self.dbus.exceptions.DBusException:
@@ -253,9 +256,7 @@ class Bluetooth:
             if self.discovering:
                 self.discovering = False
                 try:
-                    path = self._adapter_path()
-                    adapter = self.dbus.Interface(self.bus.get_object(BLUEZ, path), ADAPTER)
-                    adapter.StopDiscovery()
+                    self._iface(self._adapter_path(), ADAPTER).StopDiscovery()
                 except Exception as e:
                     log.info('stop discovery: %s', e)
             if not keep_pairable:
@@ -268,9 +269,7 @@ class Bluetooth:
 
     def _rediscover(self, address, seconds=20):
         """Searches until the controller shows up again; returns its object path."""
-        import time
-        path = self._adapter_path()
-        adapter = self.dbus.Interface(self.bus.get_object(BLUEZ, path), ADAPTER)
+        adapter = self._iface(self._adapter_path(), ADAPTER)
         try:
             adapter.StartDiscovery()
         except self.dbus.exceptions.DBusException:
@@ -356,18 +355,15 @@ class Bluetooth:
         self._remove(self._path_for(address))
 
     def _remove(self, path):
-        adapter_path = self._adapter_path()
-        adapter = self.dbus.Interface(self.bus.get_object(BLUEZ, adapter_path), ADAPTER)
         try:
-            adapter.RemoveDevice(path)
+            self._iface(self._adapter_path(), ADAPTER).RemoveDevice(path)
         except self.dbus.exceptions.DBusException as e:
             raise BluetoothError(friendly_error(e))
 
     def close(self):
         self.stop_discovery()
         try:
-            mgr = self.dbus.Interface(self.bus.get_object(BLUEZ, '/org/bluez'), 'org.bluez.AgentManager1')
-            mgr.UnregisterAgent(AGENT_PATH)
+            self._iface('/org/bluez', AGENT_MANAGER).UnregisterAgent(AGENT_PATH)
         except Exception:
             pass
         self.loop.quit()

@@ -27,6 +27,8 @@ BAD = (240, 98, 98)
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 
+BACK = ('back', 'backspace', 'escape')      # actions that go back
+
 FONT_REGULAR = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
 FONT_BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 
@@ -296,6 +298,23 @@ def pairing_box(surf, box):
                  (box.x + 24, y + 14), box.width - 48, 28, TEXT, line_gap=6)
 
 
+def tick_mark(surf, center):
+    """A big green tick, for "done" screens."""
+    x, y = center
+    pygame.draw.circle(surf, GOOD, center, 120)
+    pygame.draw.lines(surf, WHITE, False, [(x - 55, y), (x - 15, y + 45), (x + 60, y - 45)], 18)
+
+
+def numbered_steps(surf, x, y, width, steps):
+    """Steps numbered 1, 2, 3..., each a (heading, text) pair. Returns the y below them."""
+    for num, (head, body) in enumerate(steps, 1):
+        pygame.draw.circle(surf, ACCENT, (x + 30, y + 30), 30)
+        draw_text(surf, str(num), (x + 30, y + 30), 34, WHITE, bold=True, anchor='center')
+        draw_text(surf, head, (x + 84, y + 8), 36, TEXT, bold=True, max_width=width - 84)
+        y = draw_wrapped(surf, body, (x + 84, y + 60), width - 84, 30) + 28
+    return y
+
+
 # ---------------------------------------------------------------------------
 # QR codes
 # ---------------------------------------------------------------------------
@@ -394,6 +413,16 @@ class ListView:
         if 0 <= self.index < len(self.items) and self.items[self.index].selectable:
             return self.items[self.index]
         return None
+
+    def select(self, index):
+        """Highlights the item at index, scrolling to it."""
+        if 0 <= index < len(self.items):
+            self.index = index
+            self._clamp_scroll()
+
+    def page(self, d):
+        """Moves the highlight a screenful up (d=-1) or down (d=1)."""
+        self.select(max(0, min(len(self.items) - 1, self.index + d * self.visible_count())))
 
     def move(self, d):
         i = self.index
@@ -546,7 +575,7 @@ class ListScreen(Screen):
             it = self.list.selected
             if it and it.action:
                 it.action()
-        elif action in ('back', 'backspace', 'escape'):
+        elif action in BACK:
             self.app.pop()
 
     def hover(self, pos):
@@ -591,7 +620,7 @@ class Dialog:
             self.index = min(len(self.buttons) - 1, self.index + 1)
         elif action in ('select', 'enter'):
             return self.index
-        elif action in ('back', 'backspace', 'escape'):
+        elif action in BACK:
             return -1
         return None
 

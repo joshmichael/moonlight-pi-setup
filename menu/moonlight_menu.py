@@ -16,7 +16,6 @@ import json
 import logging
 import os
 import queue
-import signal
 import subprocess
 import sys
 import threading
@@ -25,12 +24,17 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')
 
-import ui  # noqa: E402
-from ui import (W, MARGIN, CONTENT_Y, FOOTER_Y, HEADER_Y, BG, PANEL, ACCENT, TEXT, DIM, FAINT,  # noqa: E402
-                GOOD, WARN, BAD, Item, ListScreen, Screen, Dialog, KeyboardScreen,
-                draw_text, draw_wrapped, rrect, dot)
+import pygame  # noqa: E402
+from pygame._sdl2 import controller as sdl_controller  # noqa: E402
+
+import bluetooth  # noqa: E402
+import network  # noqa: E402
 import settings  # noqa: E402
+import ui  # noqa: E402
 from settings_screens import CountryScreen, QuickSetup, SettingsScreen  # noqa: E402
+from ui import (W, H, MARGIN, CONTENT_Y, FOOTER_Y, HEADER_Y, BACK, BG, PANEL, ACCENT, TEXT, DIM, FAINT,  # noqa: E402
+                GOOD, WARN, BAD, WHITE, Item, ListScreen, Screen, Dialog, KeyboardScreen, draw_text, draw_wrapped,
+                rrect, dot)
 
 log = logging.getLogger('moonlight-menu')
 
@@ -40,10 +44,30 @@ EXIT_POWER = 20
 
 PHONE_SERVICE = 'moonlight-wifi-setup.service'
 PHONE_STATUS = '/run/moonlight-wifi-setup/status.json'
-SHOT_PATH = '/tmp/moonlight-menu-shot.png'
 
+# Holding a direction (or delete on the keyboard) repeats it after REPEAT_DELAY
+# seconds, every REPEAT_RATE seconds.
 REPEAT_DELAY = 0.40
 REPEAT_RATE = 0.09
+
+PAD_DIRECTIONS = {
+    pygame.CONTROLLER_BUTTON_DPAD_UP: 'up', pygame.CONTROLLER_BUTTON_DPAD_DOWN: 'down',
+    pygame.CONTROLLER_BUTTON_DPAD_LEFT: 'left', pygame.CONTROLLER_BUTTON_DPAD_RIGHT: 'right',
+}
+PAD_ACTIONS = {
+    pygame.CONTROLLER_BUTTON_A: 'select', pygame.CONTROLLER_BUTTON_B: 'back',
+    pygame.CONTROLLER_BUTTON_X: 'x', pygame.CONTROLLER_BUTTON_Y: 'y',
+    pygame.CONTROLLER_BUTTON_START: 'start', pygame.CONTROLLER_BUTTON_BACK: 'view',
+    pygame.CONTROLLER_BUTTON_LEFTSHOULDER: 'lb', pygame.CONTROLLER_BUTTON_RIGHTSHOULDER: 'rb',
+    pygame.CONTROLLER_BUTTON_LEFTSTICK: 'ls',
+}
+KEYS = {
+    pygame.K_UP: 'up', pygame.K_DOWN: 'down', pygame.K_LEFT: 'left', pygame.K_RIGHT: 'right',
+    pygame.K_RETURN: 'enter', pygame.K_KP_ENTER: 'enter', pygame.K_ESCAPE: 'escape',
+    pygame.K_BACKSPACE: 'backspace', pygame.K_SPACE: 'select',
+}
+# On the on-screen keyboard, typing goes into the field (so Space types a space).
+TYPING_KEYS = {k: a for k, a in KEYS.items() if k != pygame.K_SPACE}
 
 
 # ---------------------------------------------------------------------------
@@ -83,16 +107,13 @@ def input_devices():
 
 def boot_decision(net):
     """None to go straight to Moonlight, or why the menu should open instead."""
-    if settings.state_get('quick_setup') == '1':
+    if settings.quick_setup_pending():
         return 'quick-setup'
     net.wait_startup(20)
     if not net.online():
         return 'offline'
     gamepad, keyboard = input_devices()
-    if gamepad or keyboard:
-        return None
-    import bluetooth
-    if bluetooth.paired_gamepad_count() > 0:
+    if gamepad or keyboard or bluetooth.paired_gamepad_count() > 0:
         return None
     return 'no-controller'
 
@@ -137,16 +158,9 @@ def style_for(name):
 
 
 class App:
-    def __init__(self, args, reason=None):
-        self.args = args
+    def __init__(self, reason=None):
         self.reason = reason
-        self.test = args.test_input is not None
-        os.environ.setdefault('SDL_VIDEODRIVER', 'offscreen' if self.test else 'kmsdrm')
-        os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')
-        import pygame
-        from pygame._sdl2 import controller as sdl_controller
-        self.pg = pygame
-        self.sdl_controller = sdl_controller
+        os.environ.setdefault('SDL_VIDEODRIVER', 'kmsdrm')
         pygame.display.init()
         pygame.font.init()
         pygame.joystick.init()
@@ -155,23 +169,15 @@ class App:
         pygame.key.set_repeat(400, 60)
         self.WAKE = pygame.event.custom_type()
 
-        if args.fake:
-            import fakes
-            self.net, self.bt, self.phone = fakes.FakeNetwork(), fakes.FakeBluetooth(), fakes.FakePhoneSetup()
-            self.settings = fakes.FakeSettings()
-        else:
-            import bluetooth
-            import network
-            self.net = network.Network()
-            self.phone = PhoneSetup()
-            self.settings = settings.Settings()
-            try:
-                self.bt = bluetooth.Bluetooth()
-                if not self.bt.available():
-                    self.bt = None
-            except Exception as e:
-                log.warning('Bluetooth unavailable: %s', e)
-                self.bt = None
+        self.net = network.Network()
+        self.phone = PhoneSetup()
+        self.bt = None
+        try:
+            bt = bluetooth.Bluetooth()
+            if bt.available():
+                self.bt = bt
+        except Exception as e:
+            log.warning('Bluetooth unavailable: %s', e)
 
         self.net_status = None
         self.bt_devices = []
@@ -183,9 +189,9 @@ class App:
         self.callbacks = queue.Queue()
         self.controllers = {}          # joystick instance id -> (controller, name)
         self.joysticks = {}            # non-controller joysticks
-        self.holds = {}
+        self.holds = {}                # input held down -> (action, next repeat time, screen)
         self.triggers = {}
-        self.style = args.style or 'xbox'
+        self.style = 'xbox'
         self.exit_code = None
         self.dirty = True
         self.stopping = threading.Event()
@@ -195,51 +201,38 @@ class App:
         self.fast_poll = False
         self.quiet_boot_at_start = None   # to tell when a change needs a restart
         self.restart_prompted = False
-        self.shot_requested = False
-        self.test_steps = []
-        self.test_next = 0
-        if self.test:
-            self.test_steps = [s.strip() for s in args.test_input.split(',') if s.strip()]
-        signal.signal(signal.SIGUSR1, self._on_sigusr1)
 
     # -- display ------------------------------------------------------------
     def _init_display(self):
-        pg = self.pg
-        if self.test:
-            self.screen = self.canvas = pg.display.set_mode((W, ui.H))
-            return
+        # Draw at 1920x1080 and let SDL scale it to the TV. If it can't, scale by hand.
         self.canvas = None
         for kwargs in ({'vsync': 1}, {}):
             try:
-                self.screen = pg.display.set_mode((W, ui.H), pg.FULLSCREEN | pg.SCALED, **kwargs)
+                self.screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN | pygame.SCALED, **kwargs)
                 self.canvas = self.screen
                 break
-            except pg.error as e:
+            except pygame.error as e:
                 log.warning('Scaled display unavailable (%s)', e)
         if self.canvas is None:
-            self.screen = pg.display.set_mode((0, 0), pg.FULLSCREEN)
-            self.canvas = pg.Surface((W, ui.H))
-        pg.mouse.set_visible(False)
+            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            self.canvas = pygame.Surface((W, H))
+        pygame.mouse.set_visible(False)
 
     def _to_canvas(self, pos):
         if self.canvas is self.screen:
             return pos
         sw, sh = self.screen.get_size()
-        return (int(pos[0] * W / sw), int(pos[1] * ui.H / sh))
+        return (int(pos[0] * W / sw), int(pos[1] * H / sh))
 
     def present(self):
         if self.canvas is not self.screen:
-            self.pg.transform.smoothscale(self.canvas, self.screen.get_size(), self.screen)
-        self.pg.display.flip()
-
-    def _on_sigusr1(self, signum, frame):
-        self.shot_requested = True
-        self.wake()
+            pygame.transform.smoothscale(self.canvas, self.screen.get_size(), self.screen)
+        pygame.display.flip()
 
     # -- threads and tasks --------------------------------------------------
     def wake(self):
         try:
-            self.pg.event.post(self.pg.event.Event(self.WAKE))
+            pygame.event.post(pygame.event.Event(self.WAKE))
         except Exception:
             pass
 
@@ -300,6 +293,15 @@ class App:
         self.bt_loaded = True
         self.top.refresh()
         self.dirty = True
+
+    def _check_autopair(self):
+        """With no controller connected and none paired, pair the first one put in pairing mode."""
+        if not self.bt or self.controllers:
+            return
+        if not any(d['paired'] and d['bonded'] and d['gamepad'] for d in self.bt_devices):
+            self.autopair = True
+            self.poll_now()
+            self.top.refresh()
 
     def _autopair_step(self):
         if not self.autopair or self.autopair_paused:
@@ -399,20 +401,30 @@ class App:
         self.exit_code = EXIT_SHELL
 
     def power(self, verb):
+        def act():
+            p = subprocess.run(['systemctl', verb], capture_output=True, text=True, timeout=30)
+            if p.returncode != 0:
+                raise RuntimeError(p.stderr.strip() or 'systemctl failed')
+
         def done(res, err):
             if err:
                 self.message("Couldn't %s" % ('restart' if verb == 'reboot' else 'shut down'), str(err))
             else:
                 self.busy = 'Restarting…' if verb == 'reboot' else 'Shutting down…'
                 self.exit_code = EXIT_POWER
-
-        def act():
-            if self.args.fake:
-                return
-            p = subprocess.run(['systemctl', verb], capture_output=True, text=True, timeout=30)
-            if p.returncode != 0:
-                raise RuntimeError(p.stderr.strip() or 'systemctl failed')
         self.run_task(act, done)
+
+    def sync_moonlight_tailscale(self, wait=15):
+        """In the background, gives the PCs saved in Moonlight their Tailscale
+        addresses, so Moonlight can reach them away from home."""
+        def done(res, err):
+            if err:
+                log.warning('Tailscale addresses for Moonlight: %s', err)
+            elif res:
+                names = ' and '.join(name for name, _ in res)
+                self.show_toast("Added %s's Tailscale address to Moonlight" % names, GOOD, 5)
+                self.top.refresh()
+        self.run_task(lambda: settings.moonlight_tailscale_sync(wait), done)
 
     # -- input --------------------------------------------------------------
     def dispatch(self, action):
@@ -425,6 +437,11 @@ class App:
                 self._close_dialog(res)
             return
         self.top.handle(action)
+
+    def _use_style(self, style):
+        """Show the button hints for this controller (or the keyboard), and hide the mouse."""
+        self.style = style
+        pygame.mouse.set_visible(False)
 
     def _press_dir(self, source, action):
         self.holds[source] = (action, time.monotonic() + REPEAT_DELAY, None)
@@ -450,12 +467,9 @@ class App:
                 self.holds[src] = (action, now + REPEAT_RATE, screen)
                 self.dispatch(action)
 
-    def _controller_input(self):
-        self.pg.mouse.set_visible(False)
-
     def _add_controller(self, index):
         try:
-            c = self.sdl_controller.Controller(index)
+            c = sdl_controller.Controller(index)
         except Exception as e:
             log.warning('controller %d: %s', index, e)
             return
@@ -479,91 +493,76 @@ class App:
         self.top.refresh()
         self.dirty = True
 
+    def _controller_style(self, instance_id):
+        return style_for(self.controllers[instance_id][1])
+
     def _event(self, e):
-        pg = self.pg
         t = e.type
-        if t == pg.CONTROLLERDEVICEADDED:
+        if t == pygame.CONTROLLERDEVICEADDED:
             self._add_controller(e.device_index)
-        elif t == pg.CONTROLLERDEVICEREMOVED:
+        elif t == pygame.CONTROLLERDEVICEREMOVED:
             self._remove_controller(e.instance_id)
-        elif t == pg.JOYDEVICEADDED:
-            if not self.sdl_controller.is_controller(e.device_index):
-                j = pg.joystick.Joystick(e.device_index)
+        elif t == pygame.JOYDEVICEADDED:
+            if not sdl_controller.is_controller(e.device_index):
+                j = pygame.joystick.Joystick(e.device_index)
                 self.joysticks[j.get_instance_id()] = j
-        elif t == pg.JOYDEVICEREMOVED:
+        elif t == pygame.JOYDEVICEREMOVED:
             self.joysticks.pop(e.instance_id, None)
-        elif t in (pg.CONTROLLERBUTTONDOWN, pg.CONTROLLERBUTTONUP):
+        elif t in (pygame.CONTROLLERBUTTONDOWN, pygame.CONTROLLERBUTTONUP):
             if e.instance_id in self.controllers:
-                self._controller_input()
-                self.style = style_for(self.controllers[e.instance_id][1])
-                self._pad_button(e.instance_id, e.button, t == pg.CONTROLLERBUTTONDOWN)
-        elif t == pg.CONTROLLERAXISMOTION:
+                self._use_style(self._controller_style(e.instance_id))
+                self._pad_button(e.instance_id, e.button, t == pygame.CONTROLLERBUTTONDOWN)
+        elif t == pygame.CONTROLLERAXISMOTION:
             if e.instance_id not in self.controllers:
                 return
-            if e.axis in (pg.CONTROLLER_AXIS_LEFTX, pg.CONTROLLER_AXIS_LEFTY):
-                style = style_for(self.controllers[e.instance_id][1])
-                self._axis(('axis', e.instance_id, e.axis), e.axis == pg.CONTROLLER_AXIS_LEFTY,
-                           e.value / 32768, style)
-            elif e.axis in (pg.CONTROLLER_AXIS_TRIGGERLEFT, pg.CONTROLLER_AXIS_TRIGGERRIGHT):
+            if e.axis in (pygame.CONTROLLER_AXIS_LEFTX, pygame.CONTROLLER_AXIS_LEFTY):
+                self._axis(('axis', e.instance_id, e.axis), e.axis == pygame.CONTROLLER_AXIS_LEFTY,
+                           e.value / 32768, self._controller_style(e.instance_id))
+            elif e.axis in (pygame.CONTROLLER_AXIS_TRIGGERLEFT, pygame.CONTROLLER_AXIS_TRIGGERRIGHT):
                 self._trigger(e.instance_id, e.axis, e.value / 32767)
-        elif t in (pg.JOYBUTTONDOWN, pg.JOYHATMOTION, pg.JOYAXISMOTION, pg.JOYBUTTONUP):
+        elif t in (pygame.JOYBUTTONDOWN, pygame.JOYHATMOTION, pygame.JOYAXISMOTION, pygame.JOYBUTTONUP):
             if e.instance_id in self.joysticks:
                 self._generic_joystick(e)
-        elif t == pg.KEYDOWN:
+        elif t == pygame.KEYDOWN:
             self._key(e)
-        elif t == pg.MOUSEMOTION:
-            pg.mouse.set_visible(True)
-            pos = self._to_canvas(e.pos)
-            (self.dialog or self.top).hover(pos)
+        elif t == pygame.MOUSEMOTION:
+            pygame.mouse.set_visible(True)
+            (self.dialog or self.top).hover(self._to_canvas(e.pos))
             self.dirty = True
-        elif t == pg.MOUSEBUTTONDOWN:
-            pg.mouse.set_visible(True)
-            pos = self._to_canvas(e.pos)
+        elif t == pygame.MOUSEBUTTONDOWN:
+            pygame.mouse.set_visible(True)
+            self.dirty = True
             if self.busy:
                 return
             if e.button == 1:
-                if self.dialog:
+                pos = self._to_canvas(e.pos)
+                if not self.dialog:
+                    self.top.click(pos)
+                else:
                     i = self.dialog.click(pos)
                     if i is not None:
                         self._close_dialog(i)
-                else:
-                    self.top.click(pos)
             elif e.button == 3:
                 self.dispatch('back')
-            self.dirty = True
-        elif t == pg.MOUSEWHEEL:
+        elif t == pygame.MOUSEWHEEL:
             if not self.dialog and not self.busy:
                 self.top.wheel(e.y)
             self.dirty = True
 
     def _pad_button(self, jid, button, down):
-        pg = self.pg
-        dirs = {pg.CONTROLLER_BUTTON_DPAD_UP: 'up', pg.CONTROLLER_BUTTON_DPAD_DOWN: 'down',
-                pg.CONTROLLER_BUTTON_DPAD_LEFT: 'left', pg.CONTROLLER_BUTTON_DPAD_RIGHT: 'right'}
-        actions = {pg.CONTROLLER_BUTTON_A: 'select', pg.CONTROLLER_BUTTON_B: 'back',
-                   pg.CONTROLLER_BUTTON_X: 'x', pg.CONTROLLER_BUTTON_Y: 'y',
-                   pg.CONTROLLER_BUTTON_START: 'start', pg.CONTROLLER_BUTTON_BACK: 'view',
-                   pg.CONTROLLER_BUTTON_LEFTSHOULDER: 'lb', pg.CONTROLLER_BUTTON_RIGHTSHOULDER: 'rb',
-                   pg.CONTROLLER_BUTTON_LEFTSTICK: 'ls'}
-        if button in dirs:
-            src = ('btn', jid, button)
-            if down:
-                self._press_dir(src, dirs[button])
-            else:
-                self._release(src)
-        elif button in actions:
-            src = ('btn', jid, button)
-            if down:
-                self._press_button(src, actions[button])
-            else:
-                self._release(src)
+        src = ('btn', jid, button)
+        if not down:
+            self._release(src)
+        elif button in PAD_DIRECTIONS:
+            self._press_dir(src, PAD_DIRECTIONS[button])
+        elif button in PAD_ACTIONS:
+            self._press_button(src, PAD_ACTIONS[button])
 
     def _axis(self, src, vertical, v, style='xbox'):
         if abs(v) > 0.6:
             action = ('down' if v > 0 else 'up') if vertical else ('right' if v > 0 else 'left')
             if self.holds.get(src, (None,))[0] != action:
-                self._controller_input()
-                self.style = style
+                self._use_style(style)
                 self._release(src)
                 self._press_dir(src, action)
         elif abs(v) < 0.35:
@@ -575,17 +574,17 @@ class App:
         pressed = self.triggers.get(key, False)
         if v > 0.6 and not pressed:
             self.triggers[key] = True
-            self._controller_input()
-            self.style = style_for(self.controllers[jid][1])
-            self._press_button(('trig', jid, axis), 'lt' if axis == self.pg.CONTROLLER_AXIS_TRIGGERLEFT else 'rt')
+            self._use_style(self._controller_style(jid))
+            self._press_button(('trig', jid, axis), 'lt' if axis == pygame.CONTROLLER_AXIS_TRIGGERLEFT else 'rt')
         elif v < 0.3 and pressed:
             self.triggers[key] = False
             self._release(('trig', jid, axis))
 
     def _generic_joystick(self, e):
-        pg = self.pg
+        """Joysticks SDL doesn't know as controllers: the hat or left stick to
+        move, and the first buttons as A, B, X, Y (and Start)."""
         jid = e.instance_id
-        if e.type == pg.JOYHATMOTION:
+        if e.type == pygame.JOYHATMOTION:
             x, y = e.value
             for axis, val, neg, pos in (('hx', x, 'left', 'right'), ('hy', -y, 'up', 'down')):
                 src = ('hat', jid, axis)
@@ -594,41 +593,30 @@ class App:
                     self._press_dir(src, pos if val > 0 else neg)
                 else:
                     self._release(src)
-        elif e.type == pg.JOYAXISMOTION and e.axis in (0, 1):
+        elif e.type == pygame.JOYAXISMOTION and e.axis in (0, 1):
             self._axis(('jaxis', jid, e.axis), e.axis == 1, e.value)
-        elif e.type == pg.JOYBUTTONDOWN:
-            self._controller_input()
-            self.style = 'xbox'
+        elif e.type == pygame.JOYBUTTONDOWN:
+            self._use_style('xbox')
             action = {0: 'select', 1: 'back', 2: 'x', 3: 'y'}.get(e.button, 'start' if e.button >= 7 else None)
             if action:
                 self._press_button(('jbtn', jid, e.button), action)
-        elif e.type == pg.JOYBUTTONUP:
+        elif e.type == pygame.JOYBUTTONUP:
             self._release(('jbtn', jid, e.button))
 
     def _key(self, e):
-        pg = self.pg
-        self.style = 'keyboard'
-        pg.mouse.set_visible(False)
-        on_keyboard = isinstance(self.top, KeyboardScreen) and not self.dialog
-        if on_keyboard:
+        self._use_style('keyboard')
+        if isinstance(self.top, KeyboardScreen) and not self.dialog:
             # Typing goes into the field; only the arrows, Enter, Backspace and Esc
             # do anything else (move around the keys, press the highlighted key,
             # delete, go back).
-            keys = {pg.K_UP: 'up', pg.K_DOWN: 'down', pg.K_LEFT: 'left', pg.K_RIGHT: 'right',
-                    pg.K_RETURN: 'enter', pg.K_KP_ENTER: 'enter', pg.K_BACKSPACE: 'backspace',
-                    pg.K_ESCAPE: 'escape'}
-            if e.key in keys:
-                self.dispatch(keys[e.key])
+            if e.key in TYPING_KEYS:
+                self.dispatch(TYPING_KEYS[e.key])
             elif e.unicode and e.unicode.isprintable():
                 self.dispatch(('char', e.unicode))
-            return
-        keys = {pg.K_UP: 'up', pg.K_DOWN: 'down', pg.K_LEFT: 'left', pg.K_RIGHT: 'right',
-                pg.K_RETURN: 'enter', pg.K_KP_ENTER: 'enter', pg.K_ESCAPE: 'escape',
-                pg.K_BACKSPACE: 'backspace', pg.K_SPACE: 'select'}
-        if e.key == pg.K_TAB:
-            self.dispatch('up' if e.mod & pg.KMOD_SHIFT else 'down')
-        elif e.key in keys:
-            self.dispatch(keys[e.key])
+        elif e.key == pygame.K_TAB:
+            self.dispatch('up' if e.mod & pygame.KMOD_SHIFT else 'down')
+        elif e.key in KEYS:
+            self.dispatch(KEYS[e.key])
 
     # -- drawing ------------------------------------------------------------
     def header_status(self):
@@ -645,7 +633,6 @@ class App:
         return BAD, 'Not connected'
 
     def draw(self):
-        pg = self.pg
         c = self.canvas
         c.fill(BG)
         top = self.top
@@ -658,26 +645,24 @@ class App:
         size = next((s for s in (60, 54, 48) if ui.font(s, True).size(top.title)[0] <= room), 48)
         draw_text(c, top.title, (MARGIN, HEADER_Y + 36), size, TEXT, bold=True, anchor='midleft', max_width=room)
         top.draw(c)
-        pg.draw.line(c, PANEL, (MARGIN, FOOTER_Y - 34), (W - MARGIN, FOOTER_Y - 34), 2)
-        hints = [('A', 'OK'), ('B', 'Cancel')] if self.dialog else top.hints()
+        pygame.draw.line(c, PANEL, (MARGIN, FOOTER_Y - 34), (W - MARGIN, FOOTER_Y - 34), 2)
         if not self.busy:
-            ui.draw_hints(c, hints, self.style)
+            ui.draw_hints(c, [('A', 'OK'), ('B', 'Cancel')] if self.dialog else top.hints(), self.style)
         if self.toast:
             text, until, tcolor = self.toast
             if time.monotonic() > until:
                 self.toast = None
             else:
-                f = ui.font(32, True)
-                w = f.size(text)[0] + 80
-                box = pg.Rect((W - w) // 2, FOOTER_Y - 130, w, 70)
+                w = ui.font(32, True).size(text)[0] + 80
+                box = pygame.Rect((W - w) // 2, FOOTER_Y - 130, w, 70)
                 rrect(c, tcolor, box, 35)
-                draw_text(c, text, box.center, 32, (255, 255, 255), bold=True, anchor='center')
+                draw_text(c, text, box.center, 32, WHITE, bold=True, anchor='center')
         if self.dialog:
             self.dialog.draw(c)
         if self.busy:
             ui.shade(c, 185)
-            ui.spinner(c, (W // 2, ui.H // 2 - 50), 44, ACCENT, 9)
-            draw_text(c, self.busy, (W // 2, ui.H // 2 + 50), 40, TEXT, anchor='center')
+            ui.spinner(c, (W // 2, H // 2 - 50), 44, ACCENT, 9)
+            draw_text(c, self.busy, (W // 2, H // 2 + 50), 40, TEXT, anchor='center')
 
     @property
     def animating(self):
@@ -690,28 +675,15 @@ class App:
             return
         if self.reason == 'offline' or (after_setup and self.net_status is not None and not self.online()):
             self.push(NetworkScreen(self))
-            if self.settings.wifi_country():
+            if settings.wifi_country():
                 self.push(PhoneSetupScreen(self))
             else:
                 # Raspberry Pi OS keeps Wi-Fi off until it knows the country.
                 self.push(CountryScreen(self, '', on_changed=lambda: self.push(PhoneSetupScreen(self))))
 
-    def sync_moonlight_tailscale(self, wait=15):
-        """In the background, gives the PCs saved in Moonlight their Tailscale
-        addresses, so Moonlight can reach them away from home."""
-        def done(res, err):
-            if err:
-                log.warning('Tailscale addresses for Moonlight: %s', err)
-            elif res:
-                names = ' and '.join(name for name, _ in res)
-                self.show_toast("Added %s's Tailscale address to Moonlight" % names, GOOD, 5)
-                self.top.refresh()
-        self.run_task(lambda: self.settings.moonlight_tailscale_sync(wait), done)
-
     def run(self):
-        pg = self.pg
         self.push(HomeScreen(self))
-        if self.settings.quick_setup_pending():
+        if settings.quick_setup_pending():
             QuickSetup(self, then=lambda: self._offline_screens(after_setup=True)).start()
         else:
             self._offline_screens()
@@ -719,8 +691,7 @@ class App:
         self.sync_moonlight_tailscale()
         started = time.monotonic()
         autopair_checked = False
-        fps_log = [] if os.environ.get('MENU_DEBUG_FPS') else None   # logs the frame rate
-        clock = pg.time.Clock()
+        clock = pygame.time.Clock()
         try:
             while self.exit_code is None:
                 if self.animating:
@@ -728,11 +699,11 @@ class App:
                     # events as well: on top of drawing and the display's vsync, that
                     # would miss every other frame.
                     clock.tick(60)
-                    events = pg.event.get()
+                    events = pygame.event.get()
                 else:
-                    events = [pg.event.wait(250)] + pg.event.get()
+                    events = [pygame.event.wait(250)] + pygame.event.get()
                 for ev in events:
-                    if ev.type != pg.NOEVENT:
+                    if ev.type != pygame.NOEVENT:
                         self._event(ev)
                         if ev.type != self.WAKE:
                             self.dirty = True
@@ -744,23 +715,12 @@ class App:
                 if not autopair_checked and self.bt_loaded and time.monotonic() - started > 1.5:
                     autopair_checked = True
                     self._check_autopair()
-                if hasattr(self.top, 'tick'):
-                    if self.top.tick():
-                        self.dirty = True
-                if self.test:
-                    self._test_step()
+                if hasattr(self.top, 'tick') and self.top.tick():
+                    self.dirty = True
                 if self.dirty or self.animating:
                     self.draw()
                     self.present()
                     self.dirty = False
-                    if fps_log is not None:
-                        fps_log.append(time.monotonic())
-                        if fps_log[-1] - fps_log[0] >= 3:
-                            log.info('frames: %.1f per second', (len(fps_log) - 1) / (fps_log[-1] - fps_log[0]))
-                            del fps_log[:-1]
-                if self.shot_requested:
-                    self.shot_requested = False
-                    pg.image.save(self.canvas, SHOT_PATH)
         finally:
             self.stopping.set()
             self.poke.set()
@@ -775,50 +735,8 @@ class App:
                     self.bt.close()
                 except Exception:
                     pass
-            pg.quit()
+            pygame.quit()
         return self.exit_code
-
-    def _check_autopair(self):
-        """With no controller connected and none paired, pair the first one put in pairing mode."""
-        if not self.bt or self.controllers:
-            return
-        if not any(d['paired'] and d['bonded'] and d['gamepad'] for d in self.bt_devices):
-            self.autopair = True
-            self.poll_now()
-            self.top.refresh()
-
-    def _test_step(self):
-        if self.test_next > time.monotonic():
-            return
-        if not self.test_steps:
-            self.exit_code = 99
-            return
-        if self.busy and not self.test_steps[0].startswith(('shot:', 'wait:')):
-            return
-        step = self.test_steps.pop(0)
-        log.info('test step: %s (screen: %s)', step, type(self.top).__name__)
-        delay = 0.25
-        if step.startswith('wait:'):
-            delay = float(step[5:])
-        elif step.startswith('shot:'):
-            self.draw()
-            path = os.path.join(self.args.shots, step[5:] + '.png')
-            self.pg.image.save(self.canvas, path)
-            log.info('saved %s', path)
-        elif step.startswith('char:'):
-            for ch in step[5:]:
-                self.dispatch(('char', ch))
-        elif step.startswith('mods:'):          # e.g. mods:shift, mods:none
-            self.pg.key.set_mods(self.pg.KMOD_LSHIFT if step[5:] == 'shift' else 0)
-        elif step.startswith('hold:'):          # hold a button down until 'release'
-            self._press_button(('test', None), step[5:])
-        elif step == 'release':
-            self._release(('test', None))
-        elif step == 'quit':
-            self.exit_code = 99
-        else:
-            self.dispatch(step)
-        self.test_next = time.monotonic() + delay
 
 
 # ---------------------------------------------------------------------------
@@ -835,69 +753,6 @@ def net_summary(st):
     if st.get('hotspot'):
         return 'Phone setup'
     return 'Not connected'
-
-
-class HomeScreen(ListScreen):
-    title = 'Menu'
-
-    def refresh(self):
-        app = self.app
-        pads = len(app.controllers)
-        self.list.set_items([
-            Item('Start Moonlight', app.start_moonlight, key='start'),
-            Item('Controllers', lambda: app.push(ControllersScreen(app)), key='ctl',
-                 detail='%d connected' % pads if pads else 'None connected',
-                 detail_color=GOOD if pads else WARN),
-            Item('Wi-Fi & network', lambda: app.push(NetworkScreen(app)), key='net',
-                 detail=net_summary(app.net_status),
-                 detail_color=GOOD if app.online() else WARN),
-            Item('Settings', lambda: app.push(SettingsScreen(app)), key='settings'),
-            Item('Restart or shut down', lambda: app.push(PowerScreen(app)), key='power'),
-            Item('Command line', self._shell, key='shell'),
-        ])
-
-    def _shell(self):
-        self.app.confirm('Command line', 'Leave the menu for a text command line? You will need a keyboard. '
-                         'Type exit to come back.', 'Command line', self.app.command_line)
-
-    def handle(self, action):
-        if action == 'start':
-            self.app.start_moonlight()
-        elif action in ('back', 'escape', 'backspace'):
-            pass
-        else:
-            super().handle(action)
-
-    def hints(self):
-        return [('A', 'Select'), ('START', 'Start Moonlight')]
-
-    def draw_panel(self, surf, rect):
-        app = self.app
-        y = rect.y
-        draw_text(surf, 'Network', (rect.x, y), 30, FAINT, bold=True)
-        y += 50
-        for color, line in network_lines(app.net_status, short=True):
-            dot(surf, color, (rect.x + 10, y + 21), 8)
-            draw_text(surf, line, (rect.x + 36, y), 32, TEXT, max_width=rect.width - 36)
-            y += 48
-        y += 30
-        draw_text(surf, 'Controllers', (rect.x, y), 30, FAINT, bold=True)
-        y += 50
-        names = [n for _, n in app.controllers.values()]
-        if not names:
-            draw_text(surf, 'None connected', (rect.x, y), 32, DIM)
-            y += 48
-        for n in names[:4]:
-            dot(surf, GOOD, (rect.x + 10, y + 21), 8)
-            draw_text(surf, n, (rect.x + 36, y), 32, TEXT, max_width=rect.width - 36)
-            y += 48
-        if app.autopair:
-            y += 24
-            ui.pairing_box(surf, ui.pygame.Rect(rect.x - 16, y, rect.width + 32, rect.bottom - y + 16))
-
-    @property
-    def animating(self):
-        return self.app.autopair
 
 
 def network_lines(st, short=False):
@@ -936,6 +791,68 @@ def network_lines(st, short=False):
     return lines
 
 
+def draw_dot_lines(surf, x, y, width, lines, spacing=48):
+    """Lines of text, each with a coloured dot. Returns the y below them."""
+    for color, line in lines:
+        dot(surf, color, (x + 10, y + 21), 8)
+        draw_text(surf, line, (x + 36, y), 32, TEXT, max_width=width - 36)
+        y += spacing
+    return y
+
+
+class HomeScreen(ListScreen):
+    title = 'Menu'
+
+    def refresh(self):
+        app = self.app
+        pads = len(app.controllers)
+        self.list.set_items([
+            Item('Start Moonlight', app.start_moonlight, key='start'),
+            Item('Controllers', lambda: app.push(ControllersScreen(app)), key='ctl',
+                 detail='%d connected' % pads if pads else 'None connected',
+                 detail_color=GOOD if pads else WARN),
+            Item('Wi-Fi & network', lambda: app.push(NetworkScreen(app)), key='net',
+                 detail=net_summary(app.net_status),
+                 detail_color=GOOD if app.online() else WARN),
+            Item('Settings', lambda: app.push(SettingsScreen(app)), key='settings'),
+            Item('Restart or shut down', lambda: app.push(PowerScreen(app)), key='power'),
+            Item('Command line', self._shell, key='shell'),
+        ])
+
+    def _shell(self):
+        self.app.confirm('Command line', 'Leave the menu for a text command line? You will need a keyboard. '
+                         'Type exit to come back.', 'Command line', self.app.command_line)
+
+    def handle(self, action):
+        if action == 'start':
+            self.app.start_moonlight()
+        elif action not in BACK:
+            super().handle(action)
+
+    def hints(self):
+        return [('A', 'Select'), ('START', 'Start Moonlight')]
+
+    def draw_panel(self, surf, rect):
+        app = self.app
+        draw_text(surf, 'Network', (rect.x, rect.y), 30, FAINT, bold=True)
+        y = draw_dot_lines(surf, rect.x, rect.y + 50, rect.width, network_lines(app.net_status, short=True)) + 30
+        draw_text(surf, 'Controllers', (rect.x, y), 30, FAINT, bold=True)
+        y += 50
+        names = [n for _, n in app.controllers.values()]
+        if names:
+            y = draw_dot_lines(surf, rect.x, y, rect.width, [(GOOD, n) for n in names[:4]])
+        else:
+            draw_text(surf, 'None connected', (rect.x, y), 32, DIM)
+            y += 48
+        if app.autopair:
+            y += 24
+            ui.pairing_box(surf, pygame.Rect(rect.x - 16, y, rect.width + 32, rect.bottom - y + 16))
+
+    @property
+    def animating(self):
+        return self.app.autopair
+
+
 class ControllersScreen(ListScreen):
     title = 'Controllers'
 
@@ -960,21 +877,17 @@ class ControllersScreen(ListScreen):
         self.list.set_items(items)
 
     def draw_panel(self, surf, rect):
-        y = rect.y
-        draw_text(surf, 'Connected now', (rect.x, y), 30, FAINT, bold=True)
-        y += 50
+        draw_text(surf, 'Connected now', (rect.x, rect.y), 30, FAINT, bold=True)
+        y = rect.y + 50
         names = [n for _, n in self.app.controllers.values()]
-        if not names:
+        if names:
+            y = draw_dot_lines(surf, rect.x, y, rect.width, [(GOOD, n) for n in names[:5]])
+        else:
             draw_text(surf, 'None', (rect.x, y), 32, DIM)
             y += 48
-        for n in names[:5]:
-            dot(surf, GOOD, (rect.x + 10, y + 21), 8)
-            draw_text(surf, n, (rect.x + 36, y), 32, TEXT, max_width=rect.width - 36)
-            y += 48
-        y += 30
         draw_wrapped(surf, 'Bluetooth controllers you pair here reconnect by themselves when you switch '
                      'them on. Controllers plugged in with a USB cable work without pairing.',
-                     (rect.x, y), rect.width, 30)
+                     (rect.x, y + 30), rect.width, 30)
 
 
 class PairScreen(ListScreen):
@@ -1052,10 +965,7 @@ class DeviceScreen(ListScreen):
         self.title = 'Controller'
 
     def device(self):
-        for d in self.app.bt_devices:
-            if d['address'] == self.address:
-                return d
-        return None
+        return next((d for d in self.app.bt_devices if d['address'] == self.address), None)
 
     def refresh(self):
         d = self.device()
@@ -1063,15 +973,13 @@ class DeviceScreen(ListScreen):
             self.app.call_soon(self._gone)
             return
         self.title = d['name']
-        items = []
         if not d['bonded']:
-            items.append(Item('Pair again', self._repair, key='repair', color=WARN))
+            first = Item('Pair again', self._repair, key='repair', color=WARN)
         elif d['connected']:
-            items.append(Item('Disconnect', self._disconnect, key='conn'))
+            first = Item('Disconnect', self._disconnect, key='conn')
         else:
-            items.append(Item('Connect', self._connect, key='conn'))
-        items.append(Item('Forget this controller', self._forget, key='forget', color=BAD))
-        self.list.set_items(items)
+            first = Item('Connect', self._connect, key='conn')
+        self.list.set_items([first, Item('Forget this controller', self._forget, key='forget', color=BAD)])
 
     def _gone(self):
         if self.app.top is self:
@@ -1089,9 +997,8 @@ class DeviceScreen(ListScreen):
         app.run_task(fn, done, busy)
 
     def _connect(self):
-        d = self.device()
-        self._run(lambda: self.app.bt.connect(self.address), 'Connecting to %s…' % d['name'],
-                  '%s connected' % d['name'])
+        name = self.device()['name']
+        self._run(lambda: self.app.bt.connect(self.address), 'Connecting to %s…' % name, '%s connected' % name)
 
     def _disconnect(self):
         self._run(lambda: self.app.bt.disconnect(self.address), 'Disconnecting…', None)
@@ -1110,10 +1017,10 @@ class DeviceScreen(ListScreen):
         app.run_task(lambda: app.bt.forget(self.address), done, 'Removing the old pairing…')
 
     def _forget(self):
-        d = self.device()
-        self.app.confirm('Forget %s?' % d['name'], 'You will need to pair it again to use it over Bluetooth.',
+        name = self.device()['name']
+        self.app.confirm('Forget %s?' % name, 'You will need to pair it again to use it over Bluetooth.',
                          'Forget', lambda: self._run(lambda: self.app.bt.forget(self.address),
-                                                     'Forgetting…', '%s forgotten' % d['name']),
+                                                     'Forgetting…', '%s forgotten' % name),
                          danger=True)
 
     def draw_panel(self, surf, rect):
@@ -1140,11 +1047,10 @@ class NetworkScreen(ListScreen):
 
     def refresh(self):
         app = self.app
-        st = app.net_status
         if not app.net.wifi_dev:
             self.list.set_items([Item('This Pi has no Wi-Fi', selectable=False)])
             return
-        w = (st or {}).get('wifi') or {}
+        w = (app.net_status or {}).get('wifi') or {}
         enabled = w.get('enabled', True)
         items = [Item('Wi-Fi', self._toggle, key='toggle', detail='On' if enabled else 'Off',
                       detail_color=GOOD if enabled else None)]
@@ -1158,8 +1064,7 @@ class NetworkScreen(ListScreen):
 
     def _toggle(self):
         app = self.app
-        st = app.net_status or {}
-        on = not ((st.get('wifi') or {}).get('enabled', True))
+        on = not ((app.net_status or {}).get('wifi') or {}).get('enabled', True)
 
         def done(res, err):
             if err:
@@ -1173,15 +1078,15 @@ class NetworkScreen(ListScreen):
         uid = app.net.active_wifi_uuid()
         if not uid:
             return
-        app.run_task(lambda: app.net.disconnect(uid), lambda r, e: (e and app.message('Something went wrong', str(e)),
-                                                                     app.poll_now()), busy='Disconnecting…')
+
+        def done(res, err):
+            if err:
+                app.message('Something went wrong', str(err))
+            app.poll_now()
+        app.run_task(lambda: app.net.disconnect(uid), done, busy='Disconnecting…')
 
     def draw_panel(self, surf, rect):
-        y = rect.y
-        for color, line in network_lines(self.app.net_status):
-            dot(surf, color, (rect.x + 10, y + 21), 8)
-            draw_text(surf, line, (rect.x + 36, y), 32, TEXT, max_width=rect.width - 36)
-            y += 52
+        draw_dot_lines(surf, rect.x, rect.y, rect.width, network_lines(self.app.net_status), spacing=52)
 
 
 class WifiListScreen(ListScreen):
@@ -1203,11 +1108,8 @@ class WifiListScreen(ListScreen):
         self.app.run_task(lambda: self.app.net.scan(True), self._scanned)
 
     def _scanned(self, res, err):
-        if err:
-            self.error = str(err)
-            self.networks = []
-        else:
-            self.networks = res
+        self.error = str(err) if err else ''
+        self.networks = [] if err else res
         self.refresh()
 
     def refresh(self):
@@ -1228,7 +1130,6 @@ class WifiListScreen(ListScreen):
 
     def choose(self, n):
         app = self.app
-        import network
         if n['in_use']:
             uid = app.net.active_wifi_uuid()
             app.choose(n['ssid'], 'You are connected to this network.', ['Disconnect', 'Forget', 'Cancel'],
@@ -1251,16 +1152,18 @@ class WifiListScreen(ListScreen):
         else:
             self._ask_password(n)
 
+    def _password_keyboard(self, ssid, security, on_done, initial=''):
+        self.app.push(KeyboardScreen(self.app, 'Wi-Fi password', 'Password for "%s"' % ssid, on_done, secret=True,
+                                     initial=initial, validate=lambda t: network.validate_password(security, t)))
+
     def _ask_password(self, n, initial=''):
-        import network
         app = self.app
 
         def done(pw):
             if pw is not None:
                 self._connect(lambda: app.net.connect_new(n['ssid'], pw, n['security']), n['ssid'],
                               retry=lambda: self._ask_password(n, pw))
-        app.push(KeyboardScreen(app, 'Wi-Fi password', 'Password for "%s"' % n['ssid'], done, secret=True,
-                                initial=initial, validate=lambda t: network.validate_password(n['security'], t)))
+        self._password_keyboard(n['ssid'], n['security'], done, initial)
 
     def _connect(self, fn, ssid, retry=None):
         app = self.app
@@ -1296,28 +1199,21 @@ class WifiListScreen(ListScreen):
         app = self.app
 
         def got_ssid(ssid):
-            if not ssid:
-                return
-            app.choose('Password', 'Does "%s" have a password?' % ssid, ['Yes', 'No'],
-                       lambda i: got_kind(ssid, i == 0))
+            if ssid:
+                app.choose('Password', 'Does "%s" have a password?' % ssid, ['Yes', 'No'],
+                           lambda i: got_kind(ssid, i == 0))
 
         def got_kind(ssid, secured):
             if not secured:
                 self._connect(lambda: app.net.connect_new(ssid, '', '', hidden=True), ssid)
                 return
-            n = {'ssid': ssid, 'security': 'WPA2'}
-            import network
 
             def done(pw):
                 if pw is not None:
                     self._connect(lambda: app.net.connect_new(ssid, pw, 'WPA2', hidden=True), ssid)
-            app.push(KeyboardScreen(app, 'Wi-Fi password', 'Password for "%s"' % ssid, done, secret=True,
-                                    validate=lambda t: network.validate_password(n['security'], t)))
+            self._password_keyboard(ssid, 'WPA2', done)
         app.push(KeyboardScreen(app, 'Network name', 'Type the network name (it is case-sensitive)',
                                 got_ssid, max_len=32, validate=lambda t: '' if t else 'Type a name first.'))
-
-    def hints(self):
-        return [('A', 'Select'), ('B', 'Back')]
 
     def draw_panel(self, surf, rect):
         y = draw_text(surf, 'Tips', (rect.x, rect.y), 30, FAINT, bold=True).bottom + 18
@@ -1342,42 +1238,43 @@ class SavedScreen(ListScreen):
     def load(self):
         app = self.app
 
-        def work():
-            return app.net.saved(), app.net.active_wifi_uuid()
-
         def done(res, err):
             self.saved, self.active = res if res else ([], None)
             self.refresh()
-        app.run_task(work, done)
+        app.run_task(lambda: (app.net.saved(), app.net.active_wifi_uuid()), done)
 
     def refresh(self):
         if self.saved is None:
             self.list.set_items([Item('Loading…', selectable=False, spinner=True)])
-            return
-        if not self.saved:
+        elif not self.saved:
             self.list.set_items([Item('No saved networks', selectable=False)])
-            return
-        self.list.set_items([Item(s['ssid'], lambda s=s: self.choose(s), key=s['uuid'],
-                                  detail='Connected' if s['uuid'] == self.active else '',
-                                  detail_color=GOOD) for s in self.saved])
+        else:
+            self.list.set_items([Item(s['ssid'], lambda s=s: self.choose(s), key=s['uuid'],
+                                      detail='Connected' if s['uuid'] == self.active else '',
+                                      detail_color=GOOD) for s in self.saved])
 
     def choose(self, s):
         app = self.app
         connected = s['uuid'] == self.active
 
+        def connected_to(res, err):
+            if err:
+                app.message("Couldn't connect", str(err))
+            else:
+                app.show_toast('Connected to %s' % s['ssid'], GOOD)
+            app.poll_now()
+            self.load()
+
         def act(i):
             if i == 0 and not connected:
-                app.run_task(lambda: app.net.connect_saved(s['uuid']),
-                             lambda r, e: (app.message("Couldn't connect", str(e)) if e else
-                                           app.show_toast('Connected to %s' % s['ssid'], GOOD),
-                                           app.poll_now(), self.load()),
+                app.run_task(lambda: app.net.connect_saved(s['uuid']), connected_to,
                              busy='Connecting to %s…' % s['ssid'])
             elif i == (0 if connected else 1):
                 app.confirm('Forget %s?' % s['ssid'], "The Pi won't join it again until you enter the password.",
                             'Forget', lambda: app.run_task(lambda: app.net.forget(s['uuid']),
                                                            lambda r, e: (app.poll_now(), self.load()),
                                                            busy='Forgetting…'), danger=True)
-        options = (['Forget', 'Cancel'] if connected else ['Connect', 'Forget', 'Cancel'])
+        options = ['Forget', 'Cancel'] if connected else ['Connect', 'Forget', 'Cancel']
         app.choose(s['ssid'], 'Connected now.' if connected else 'Saved network.', options, act)
 
     def draw_panel(self, surf, rect):
@@ -1387,11 +1284,6 @@ class SavedScreen(ListScreen):
 
 class PhoneSetupScreen(Screen):
     title = 'Set up Wi-Fi from your phone'
-
-    @property
-    def animating(self):
-        """Only while the spinner shows (starting or connecting)."""
-        return not self.error and (self.status or {}).get('state') in (None, 'starting', 'connecting')
 
     def __init__(self, app):
         super().__init__(app)
@@ -1405,10 +1297,20 @@ class PhoneSetupScreen(Screen):
         self.done_at = None
         self.stopped = False
 
+    @property
+    def animating(self):
+        """Only while the spinner shows (starting or connecting)."""
+        return not self.error and self.state() in (None, 'starting', 'connecting')
+
+    def state(self):
+        return (self.status or {}).get('state')
+
+    def failed(self):
+        return self.error or self.state() in ('error', 'stopped')
+
     def enter(self):
-        if self.stopped:
-            return
-        self.app.run_task(self.app.phone.start, self._started)
+        if not self.stopped:
+            self.app.run_task(self.app.phone.start, self._started)
 
     def _started(self, res, err):
         if err:
@@ -1430,7 +1332,7 @@ class PhoneSetupScreen(Screen):
         st = self.app.phone.status(self.since)
         if st != self.status:
             self.status = st
-            if st and st.get('state') == 'connected' and self.done_at is None:
+            if self.state() == 'connected' and self.done_at is None:
                 self.done_at = now
                 self.stopped = True     # the service stops itself
                 self.app.poll_now()
@@ -1442,14 +1344,13 @@ class PhoneSetupScreen(Screen):
         return False
 
     def handle(self, action):
-        st = (self.status or {}).get('state')
-        if action in ('back', 'escape', 'backspace'):
-            if st == 'connected':
+        if action in BACK:
+            if self.state() == 'connected':
                 self.app.pop_to_home()
                 return
             self.app.confirm('Stop phone setup?', 'The setup network will be switched off.', 'Stop',
                              self._leave)
-        elif action in ('select', 'enter') and (self.error or st in ('error', 'stopped')):
+        elif action in ('select', 'enter') and self.failed():
             self.error = ''
             self.status = None
             self.since = time.time() - 1
@@ -1461,22 +1362,20 @@ class PhoneSetupScreen(Screen):
         self.app.pop()
 
     def hints(self):
-        st = (self.status or {}).get('state')
-        if self.error or st in ('error', 'stopped'):
+        if self.failed():
             return [('A', 'Try again'), ('B', 'Back')]
         return [('B', 'Stop')]
 
     def draw(self, surf):
-        pg = ui.pygame
         st = self.status or {}
         state = st.get('state')
-        left = pg.Rect(MARGIN, CONTENT_Y, 640, 640)
+        left = pygame.Rect(MARGIN, CONTENT_Y, 640, 640)
         right_x = MARGIN + 720
         width = W - MARGIN - right_x
-        if self.error or state in ('error', 'stopped'):
-            msg = self.error or st.get('message') or 'Phone setup stopped.'
+        if self.failed():
             draw_text(surf, 'Phone setup isn\'t running', (right_x, CONTENT_Y), 44, TEXT, bold=True)
-            draw_wrapped(surf, msg, (right_x, CONTENT_Y + 80), width, 32, BAD)
+            draw_wrapped(surf, self.error or st.get('message') or 'Phone setup stopped.', (right_x, CONTENT_Y + 80),
+                         width, 32, BAD)
             return
         if state in (None, 'starting'):
             ui.spinner(surf, left.center, 50, ACCENT, 10)
@@ -1492,10 +1391,7 @@ class PhoneSetupScreen(Screen):
                          (right_x, CONTENT_Y + 80), width, 32)
             return
         if state == 'connected':
-            pg.draw.circle(surf, GOOD, left.center, 120)
-            pg.draw.lines(surf, (255, 255, 255), False, [(left.centerx - 55, left.centery),
-                                                         (left.centerx - 15, left.centery + 45),
-                                                         (left.centerx + 60, left.centery - 45)], 18)
+            ui.tick_mark(surf, left.center)
             draw_text(surf, 'Connected to %s' % st.get('ssid', ''), (right_x, CONTENT_Y), 44, TEXT, bold=True,
                       max_width=width)
             draw_wrapped(surf, 'You can put your phone away.', (right_x, CONTENT_Y + 80), width, 32)
@@ -1506,28 +1402,22 @@ class PhoneSetupScreen(Screen):
             self.qr_key = (ssid, pw, url)
             self.qr = ui.qr_surface(ui.wifi_qr_text(ssid, pw), 560)
             self.url_qr = ui.qr_surface(url, 220) if url else None
-        rrect(surf, (255, 255, 255), left, 24)
+        rrect(surf, WHITE, left, 24)
         if self.qr:
             surf.blit(self.qr, self.qr.get_rect(center=left.center))
         else:
-            draw_text(surf, 'Install python3-qrcode for a QR code', left.center, 28, (0, 0, 0), anchor='center')
+            draw_text(surf, 'Install python3-qrcode for a QR code', left.center, 28, ui.BLACK, anchor='center')
         y = CONTENT_Y
         if st.get('last_error'):
-            box = pg.Rect(right_x, y, width, 90)
+            box = pygame.Rect(right_x, y, width, 90)
             rrect(surf, (90, 36, 36), box, 16)
             draw_text(surf, "Couldn't connect: %s" % st['last_error'], (box.x + 24, box.centery), 30, TEXT,
                       anchor='midleft', max_width=box.width - 48)
             y += 120
-        steps = [
-            ('1', 'Scan the code with your phone camera', 'It joins the network "%s" (password: %s).' % (ssid, pw)),
-            ('2', 'A setup page opens', "If it doesn't, open %s in your phone's browser." % url),
-            ('3', 'Choose your Wi-Fi and type its password', 'The Pi connects and this screen updates.'),
-        ]
-        for num, head, body in steps:
-            pg.draw.circle(surf, ACCENT, (right_x + 30, y + 30), 30)
-            draw_text(surf, num, (right_x + 30, y + 30), 34, (255, 255, 255), bold=True, anchor='center')
-            draw_text(surf, head, (right_x + 84, y + 8), 36, TEXT, bold=True, max_width=width - 84)
-            y = draw_wrapped(surf, body, (right_x + 84, y + 60), width - 84, 30) + 28
+        y = ui.numbered_steps(surf, right_x, y, width, [
+            ('Scan the code with your phone camera', 'It joins the network "%s" (password: %s).' % (ssid, pw)),
+            ('A setup page opens', "If it doesn't, open %s in your phone's browser." % url),
+            ('Choose your Wi-Fi and type its password', 'The Pi connects and this screen updates.')])
         if self.url_qr and y + 240 < FOOTER_Y - 40:
             surf.blit(self.url_qr, (right_x + 84, y))
             draw_wrapped(surf, 'Or scan this to open the setup page.', (right_x + 84 + 250, y + 20),
@@ -1556,25 +1446,17 @@ class PowerScreen(ListScreen):
 def main():
     p = argparse.ArgumentParser(description='Moonlight Pi menu')
     p.add_argument('--boot', action='store_true', help='decide at boot whether the menu is needed')
-    p.add_argument('--fake', action='store_true', help='use fake Wi-Fi/Bluetooth data (testing)')
-    p.add_argument('--reason', choices=['offline', 'no-controller', 'quick-setup'],
-                   help='open as if for this reason (testing)')
-    p.add_argument('--test-input', help='comma-separated actions to run headless (testing)')
-    p.add_argument('--style', choices=['ps', 'xbox', 'switch', 'steam', 'keyboard'],
-                   help='button style to start with (testing)')
-    p.add_argument('--shots', default='.', help='where --test-input saves screenshots')
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s: %(message)s')
 
-    reason = args.reason
+    reason = None
     if args.boot:
-        import network
         reason = boot_decision(network.Network())
         if reason is None:
             # Quick when there's nothing to do; only looks for the PC when Moonlight
             # doesn't have its Tailscale address yet.
             try:
-                for name, ip in settings.Settings().moonlight_tailscale_sync():
+                for name, ip in settings.moonlight_tailscale_sync():
                     log.info("boot: added %s's Tailscale address (%s) to Moonlight", name, ip)
             except Exception as e:
                 log.warning('boot: Tailscale addresses for Moonlight: %s', e)
@@ -1582,7 +1464,7 @@ def main():
             return EXIT_MOONLIGHT
         log.info('boot: opening the menu (%s)', reason)
     try:
-        return App(args, reason).run()
+        return App(reason).run()
     except Exception:
         log.exception('menu failed')
         return 1
