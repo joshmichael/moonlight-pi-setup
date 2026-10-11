@@ -286,6 +286,16 @@ def draw_hints(surf, hints, style):
         x = draw_text(surf, label, (x, cy), 28, DIM, anchor='midleft').right + 40
 
 
+def pairing_box(surf, box):
+    """The "Looking for a controller" box shown while auto-pairing."""
+    rrect(surf, ACCENT_SOFT, box, 18)
+    spinner(surf, (box.right - 44, box.y + 44), 18, WHITE, 5)
+    y = draw_text(surf, 'Looking for a controller', (box.x + 24, box.y + 22), 32, TEXT, bold=True).bottom
+    draw_wrapped(surf, 'Put a Bluetooth controller in pairing mode and it connects by itself. '
+                 'PlayStation: hold Create (Share) + PS. Xbox: hold the pair button on top.',
+                 (box.x + 24, y + 14), box.width - 48, 28, TEXT, line_gap=6)
+
+
 # ---------------------------------------------------------------------------
 # QR codes
 # ---------------------------------------------------------------------------
@@ -322,8 +332,12 @@ def wifi_qr_text(ssid, password):
 # Lists
 # ---------------------------------------------------------------------------
 class Item:
+    """A list row. toggle=True/False draws an On/Off switch; desc is shown in
+    the info panel of screens that describe the highlighted row."""
+
     def __init__(self, label, action=None, detail='', key=None, selectable=True,
-                 color=None, detail_color=None, signal=None, locked=False, spinner=False):
+                 color=None, detail_color=None, signal=None, locked=False, spinner=False,
+                 toggle=None, desc=''):
         self.label = label
         self.action = action
         self.detail = detail
@@ -334,6 +348,17 @@ class Item:
         self.signal = signal
         self.locked = locked
         self.spinner = spinner
+        self.toggle = toggle
+        self.desc = desc
+
+
+def switch(surf, x, cy, on):
+    """An On/Off switch 76 px wide, vertically centred on cy."""
+    def draw(s, k):
+        pygame.draw.rect(s, GOOD if on else (70, 77, 94), (0, 0, 76 * k, 42 * k), border_radius=21 * k)
+        pygame.draw.circle(s, WHITE if on else (196, 201, 212), ((55 if on else 21) * k, 21 * k), 16 * k)
+    surf.blit(_icon(('switch', on), (76, 42), draw), (x, cy - 21))
+    return 76
 
 
 class ListView:
@@ -418,6 +443,9 @@ class ListView:
                 rrect(surf, PANEL, r, 18)
             label_color = WHITE if selected else (it.color or (TEXT if it.selectable else DIM))
             right = r.right - 28
+            if it.toggle is not None:
+                switch(surf, right - 76, r.centery, it.toggle)
+                right -= 76 + 24
             if it.signal is not None:
                 signal_bars(surf, right - 44, r.centery, it.signal, WHITE if selected else TEXT)
                 right -= 44 + 22
@@ -432,8 +460,14 @@ class ListView:
                 dr = draw_text(surf, it.detail, (right, r.centery), 30, dcolor, anchor='midright',
                                max_width=r.width // 2)
                 right = dr.left - 24
-            draw_text(surf, it.label, (r.x + 32, r.centery), 38, label_color,
-                      bold=selected, anchor='midleft', max_width=right - r.x - 40)
+            # A long label gets a slightly smaller font before it's cut short. It's
+            # measured in bold so the size doesn't change when it's highlighted.
+            max_w = right - r.x - 40
+            size = 38
+            while size > 30 and font(size, True).size(it.label)[0] > max_w:
+                size -= 2
+            draw_text(surf, it.label, (r.x + 32, r.centery), size, label_color,
+                      bold=selected, anchor='midleft', max_width=max_w)
             y += self.item_h + self.gap
         if self.scroll > 0:
             pygame.draw.polygon(surf, DIM, [(self.rect.centerx - 14, self.rect.y - 14),

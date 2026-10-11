@@ -30,26 +30,13 @@ less moonlight-pi-setup.sh
 bash moonlight-pi-setup.sh
 ```
 
-Have the TV (and receiver, if you use one) switched on while the script runs, so it can detect the HDMI port and play a speaker test.
+### What the script asks
 
-### Questions the script asks
+Nothing, apart from your password (if `sudo` needs it). It shows a summary and asks **Go ahead?** before changing anything, and offers to reboot at the end. It always installs Moonlight, the [TV menu](#the-tv-menu), [Tailscale](#tailscale-streaming-away-from-home) and [VirtualHere](#virtualhere-sharing-usb-devices-with-your-pc), and the Pi always boots straight into Moonlight.
 
-| Question | Default |
-|---|---|
-| Start Moonlight automatically when the Pi boots (recommended) | Yes |
-| **With auto-start:** Show the controller and Wi-Fi menu when Moonlight closes (recommended) | Yes |
-| **With the menu, only if the Pi doesn't know yet:** Which country you're in (two letters, for Wi-Fi channels) | — |
-| Speaker setup: Stereo, 5.1 or 7.1 | Stereo |
-| Hide boot messages (recommended) | Yes |
-| Quit the running game on your PC when the Pi shuts down (recommended) | Yes |
-| **Wi-Fi only:** Turn off Wi-Fi power saving (recommended on Wi-Fi) | Yes |
-| Install Tailscale (not asked if it's already installed) | No |
-| Install VirtualHere (not asked if it's already installed) | No |
-| **With VirtualHere and auto-start:** Share USB devices with your PC only while streaming (recommended) | Yes |
+Everything else is chosen on the TV with a controller. After the restart, **Quick setup** asks for the Wi-Fi country (only if it isn't set yet), your speakers (with a speaker test), whether to end the stream on your PC when the Pi shuts down, hiding boot messages, Wi-Fi power saving (if you're on Wi-Fi), when VirtualHere sends USB devices to your PC, and whether to sign in to Tailscale now (scan a code with your phone). Until then, the recommended settings are used. You can change any of them later in the menu's **Settings** (see [Settings and Quick setup](#settings-and-quick-setup)).
 
-You'll see a summary before anything is changed. At the end, the script offers to reboot.
-
-When you re-run the script, the defaults are the answers you gave last time, so you can just press Enter through everything except the setting you want to change.
+Running the script again updates or repairs the setup, and keeps your settings as they are.
 
 ## What the script changes
 
@@ -58,18 +45,20 @@ When you re-run the script, the defaults are the answers you gave last time, so 
 | Installs `moonlight-qt` with `apt` (adds Moonlight's official package repository only if needed) | The official build, kept up to date by `apt upgrade` |
 | Adds your user to the `video`, `render`, `input` and `audio` groups | Access to the display, GPU, controllers and audio |
 | Writes `~/.config/moonlight-pi-setup/eglfs.json` | Points Moonlight at the Pi 5's display controller. Without it Moonlight fails with **"Cannot create window: no screens available"** |
-| Writes `~/.asoundrc`, and checks which HDMI port has a screen connected each time Moonlight starts | Sends audio to the TV's HDMI port, even if you swap ports later, and fixes the surround channel order (see below) |
+| Writes `~/.asoundrc` for your speakers, sets Moonlight's audio setting to match, and checks which HDMI port has a screen connected each time Moonlight starts | Sends audio to the TV's HDMI port, even if you swap ports later, and fixes the surround channel order (see below) |
 | Sets `AUDIODEV=default` and `SDL_AUDIODRIVER=alsa` | Stops Moonlight wrongly reporting that surround sound isn't supported, and makes it use the settings above |
 | Writes `/etc/sysctl.d/90-moonlight-pi-setup.conf` (`net.core.rmem_max`) | Lets Moonlight use a larger network buffer, which helps at high bitrates |
 | Switches the Pi to boot to the console with auto-login, and adds a launch loop to `~/.bash_profile` | Boots straight into Moonlight, and restarts it if it closes. How the Pi booted before is remembered and restored on uninstall |
-| Optional: installs the TV menu (`python3-pygame` and friends, `/usr/local/lib/moonlight-pi-setup/menu`, `/usr/local/bin/moonlight-menu`), the `moonlight-wifi-setup` service, and a polkit rule (`/etc/polkit-1/rules.d/50-moonlight-pi-setup.rules`) | A menu on the TV for Bluetooth controllers, Wi-Fi and restarting, usable with a controller (see [The TV menu](#the-tv-menu)). The polkit rule lets your user change Wi-Fi, restart or shut down, and run phone setup without a password |
-| Optional: adds quiet-boot options to `/boot/firmware/cmdline.txt` and `config.txt` | Hides boot text and the splash screen |
-| Optional: installs `/usr/local/bin/moonlight-quit-all` and the `moonlight-quit-on-shutdown` service | Ends the game on your PC when the Pi is switched off (see below) |
-| Optional, on Wi-Fi: writes `/etc/NetworkManager/conf.d/90-moonlight-pi-setup-wifi.conf` (`wifi.powersave = 2`) | Wi-Fi power saving makes the Pi's Wi-Fi doze between packets, which causes stutter and lag spikes |
-| Optional: installs Tailscale and/or VirtualHere | See below |
-| Optional, with VirtualHere: installs `/usr/local/bin/moonlight-usb-handoff` and the `moonlight-usb-handoff` service, and stops the VirtualHere server starting at boot | Shares USB devices with your PC only while you're streaming (see below) |
+| Installs the TV menu (`python3-pygame` and friends, `/usr/local/lib/moonlight-pi-setup/menu`, `/usr/local/bin/moonlight-menu`), the `moonlight-wifi-setup` service, and a polkit rule (`/etc/polkit-1/rules.d/50-moonlight-pi-setup.rules`) | A menu on the TV for Bluetooth controllers, Wi-Fi, settings and restarting, usable with a controller (see [The TV menu](#the-tv-menu)). The polkit rule lets your user change Wi-Fi, restart or shut down, and run phone setup without a password |
+| Installs the settings helper (`/usr/local/lib/moonlight-pi-setup/moonlight-settings`) and a sudoers rule for it (`/etc/sudoers.d/moonlight-pi-setup`). The helper keeps its records in `/var/lib/moonlight-pi-setup` | The script and the menu's Settings both change settings through this one helper. It's owned by root and only accepts its own settings, so the rule lets the menu use it without a password |
+| Setting, on by default: adds quiet-boot options to `/boot/firmware/cmdline.txt` and `config.txt` | Hides boot text and the splash screen |
+| Setting, on by default: installs `/usr/local/bin/moonlight-quit-all` and the `moonlight-quit-on-shutdown` service | Ends the stream on your PC when the Pi is switched off (see below) |
+| Setting, on by default: writes `/etc/NetworkManager/conf.d/90-moonlight-pi-setup-wifi.conf` (`wifi.powersave = 2`) | Turns off Wi-Fi power saving, which can make the Pi's Wi-Fi doze between packets and cause stutter and lag spikes |
+| Installs Tailscale and the VirtualHere USB server | See below. Tailscale does nothing until you sign the Pi in on the TV, and VirtualHere does nothing until the VirtualHere client on your PC uses a device |
+| Setting, on by default with VirtualHere: installs `/usr/local/bin/moonlight-usb-handoff` and the `moonlight-usb-handoff` service, and stops the VirtualHere server starting at boot | VirtualHere sends USB devices to your PC only while you're streaming (see below) |
+| With VirtualHere, unless VirtualHere over Tailscale is turned on: adds the `moonlight-virtualhere-tailscale` service, which loads a firewall rule (nftables) | Blocks VirtualHere on the Tailscale network, so it only works at home (see below) |
 
-Everything the script adds is wrapped in marker comments, and every file is backed up first, so it's safe to **run it again** to change your choices. Answering No to an option you turned on before undoes it (for example, boot messages come back and the quit-on-shutdown service is removed).
+Everything the script adds is wrapped in marker comments, and every file is backed up first, so it's safe to **run it again**: it updates or repairs the setup and keeps your settings. Turning a setting off in the menu undoes it (for example, boot messages come back and the quit-on-shutdown service is removed).
 
 ### Why the audio fix is needed
 
@@ -84,7 +73,7 @@ The script fixes both.
 
 ## After rebooting
 
-If you chose to boot straight into Moonlight, the Pi boots into Moonlight's host list. Pair it with your PC (enter the PIN shown in your host's web UI), then set:
+The first time, Quick setup opens on the TV (see [Settings and Quick setup](#settings-and-quick-setup)). After that, the Pi boots into Moonlight's host list. Pair it with your PC (enter the PIN shown in your host's web UI), then set:
 
 | Setting | Recommended |
 |---|---|
@@ -93,15 +82,15 @@ If you chose to boot straight into Moonlight, the Pi boots into Moonlight's host
 | Frame rate | 60 FPS |
 | Bitrate | 50–100 Mbit/s on wired Ethernet |
 | V-Sync | On. Off saves a few milliseconds, but may cause tearing |
-| Audio | Match your speakers, and set Windows to the same layout |
+| Audio | Already set to match your speakers (change them in the menu's Settings). Set Windows to the same layout |
 
 Press **Ctrl+Alt+Shift+S** during a stream to show the performance overlay, and **Ctrl+Alt+Shift+Q** (or Select+Start+L1+R1 on a controller) to end it.
 
-To get a command line on the TV, quit Moonlight and choose **Command line** in the [TV menu](#the-tv-menu) (without the menu: press any key within 5 seconds of Moonlight closing).
+To get a command line on the TV, quit Moonlight and choose **Command line** in the [TV menu](#the-tv-menu).
 
 ## The TV menu
 
-If you chose the menu, it opens on the TV whenever Moonlight closes. To get there from Moonlight's main screen (the list of PCs), press **B** (Circle on PlayStation) or **Esc**, and confirm quitting. It also opens by itself at boot if the Pi isn't connected to a network, or if no controller is connected or paired yet.
+The menu opens on the TV whenever Moonlight closes. To get there from Moonlight's main screen (the list of PCs), press **B** (Circle on PlayStation) or **Esc**, and confirm quitting. It also opens by itself at boot if the Pi isn't connected to a network, if no controller is connected or paired yet, or for Quick setup after installing.
 
 It works with a controller (D-pad or left stick, A to select, B to go back), a keyboard (arrow keys, Enter, Esc) or a mouse.
 
@@ -110,6 +99,7 @@ It works with a controller (D-pad or left stick, A to select, B to go back), a k
 | **Start Moonlight** | Back to Moonlight (or press Start/Options) |
 | **Controllers** | Pair a new Bluetooth controller, and connect, disconnect or forget paired ones. Shows battery levels where the controller reports them. Paired controllers reconnect by themselves when you switch them on |
 | **Wi-Fi & network** | Network status, Wi-Fi on/off, choose a Wi-Fi network (with an on-screen keyboard for the password), set up Wi-Fi from your phone, and saved networks |
+| **Settings** | Speakers, ending the stream at shutdown, VirtualHere, Tailscale, Wi-Fi power saving and country, boot messages, updates, and information about the Pi (see [below](#settings-and-quick-setup)) |
 | **Restart or shut down** | Restarts or shuts down the Pi |
 | **Command line** | Leaves the menu for a text command line (needs a keyboard). Type `exit` to come back |
 
@@ -127,18 +117,37 @@ Notes:
 
 - Bluetooth controllers always work through Moonlight on the Pi. They can't be moved to your PC with the [VirtualHere hand-off](#virtualhere-sharing-usb-devices-with-your-pc), because the Pi 5's built-in Bluetooth isn't a USB device. For full DualSense features (adaptive triggers, HD haptics), use a USB cable, or a USB Bluetooth adapter on the Pi that VirtualHere moves as a whole.
 - Enterprise Wi-Fi (networks that need a username as well as a password) isn't supported in the menu.
-- The menu's log is at `/tmp/moonlight-menu.log`. If the menu can't start, the Pi falls back to the plain "press any key for a command line" prompt and restarts Moonlight.
+- The menu's log is at `/tmp/moonlight-menu.log`. If the menu can't start, the Pi falls back to a plain "press any key for a command line" prompt and restarts Moonlight.
 
-## Optional extras
+### Settings and Quick setup
 
-### Quit the game when the Pi is switched off
+| Setting | What it does |
+|---|---|
+| **Speakers** | Stereo, 5.1 or 7.1 surround (7.1 is experimental), and a speaker test where each speaker says where it is. Moonlight's own audio setting is changed to match |
+| **End stream on PC at shutdown** | See [End the stream when the Pi is switched off](#end-the-stream-when-the-pi-is-switched-off). On by default |
+| **VirtualHere** | Only shown with VirtualHere. **Send USB to PC only while streaming** (on by default; see [Sending USB devices to the PC only while streaming](#sending-usb-devices-to-the-pc-only-while-streaming-recommended)), and **Use VirtualHere over Tailscale** (off by default, not recommended; see [VirtualHere over Tailscale](#virtualhere-over-tailscale-not-recommended)) |
+| **Tailscale** | Shows whether Tailscale is connected, its address, and whether Moonlight can reach your PC over Tailscale (the Pi adds the PC's Tailscale address to Moonlight by itself). Sign in by scanning a code with your phone, turn it off or on, or sign out. If Tailscale isn't installed, it can install it |
+| **Wi-Fi power saving** | Only shown on a Pi with Wi-Fi. Power saving can make Wi-Fi doze between packets, which can cause stutter and lag spikes when streaming. Off by default, and keeping it off is recommended |
+| **Wi-Fi country** | Which country's Wi-Fi channels the Pi uses. Raspberry Pi OS keeps Wi-Fi off until it's set, so Quick setup asks for it if it isn't set yet, and so does the menu before Wi-Fi setup from a phone |
+| **Hide boot messages** | Hides the text and the splash screen while the Pi starts. Takes effect after a restart, which the menu offers. On by default |
+| **Updates** | Checks for and installs new versions of Moonlight and Raspberry Pi OS (like `sudo apt full-upgrade`), and updates this setup from GitHub, keeping your settings |
+| **About this Pi** | Network and Tailscale addresses, the command to connect over SSH, versions (this setup, Moonlight and Tailscale), temperature, power supply warnings and free storage |
+| **Run Quick setup again** | Goes through the first-time questions again |
 
-If you switch the Pi off (for example with its power button) without quitting the game in Moonlight first, your PC keeps the game running, because streaming hosts are designed to let you reconnect and carry on. With a virtual display (Apollo or Vibepollo), this can leave the PC stuck on the stream until the session is ended.
+**Quick setup** runs the first time the Pi starts after installing. It asks one question per screen and applies each answer straight away. Questions that don't apply are left out: the Wi-Fi country if it's already set, Wi-Fi power saving on Ethernet, and the Tailscale sign-in if the Pi is already signed in or not connected to the internet. You can skip it, and run it again from Settings.
 
-With this option, the Pi tells every PC it's paired with to quit its running game as it shuts down. PCs with nothing running aren't affected. The command is sent before the network is switched off, and if a PC doesn't respond the Pi gives up after 10 seconds per PC, so shutdown is never held up for long.
+**Updating this setup** downloads the latest script from GitHub and runs it again with your current settings, without asking any questions. Restart afterwards to finish.
 
-- This **closes the game**, the same as choosing Quit in Moonlight, so save first.
-- If someone else is streaming from one of your paired PCs on another device, their game will be closed too.
+## Extras
+
+### End the stream when the Pi is switched off
+
+If you switch the Pi off (for example with its power button) without ending the stream in Moonlight first, your PC keeps the stream and the game running, because streaming hosts are designed to let you reconnect and carry on. With a virtual display (Apollo or Vibepollo), this can leave the PC stuck on the stream until the session is ended.
+
+With this setting (on by default; Settings → **End stream on PC at shutdown**), the Pi tells every PC it's paired with to end its stream as it shuts down. PCs that aren't streaming aren't affected. The command is sent before the network is switched off, and if a PC doesn't respond the Pi gives up after 10 seconds per PC, so shutdown is never held up for long.
+
+- This **closes the game you're streaming**, the same as choosing Quit in Moonlight, so save first.
+- If someone else is streaming from one of your paired PCs on another device, their stream will be ended too.
 - To test it without shutting down, start a stream and run `moonlight-quit-all` over SSH.
 - To see what happened at recent shutdowns: `cat ~/.local/share/moonlight-pi-setup/quit-on-shutdown.log`. (Raspberry Pi OS clears the system journal at every reboot, so `journalctl -b -1` won't show it.)
 
@@ -147,32 +156,35 @@ With this option, the Pi tells every PC it's paired with to quit its running gam
 [Tailscale](https://tailscale.com) connects the Pi and your PC over the internet without opening ports on your router.
 
 - Install Tailscale on your **gaming PC** too, signed in to the same account. The [PC setup script](#setting-up-the-gaming-pc) can do this.
+- The setup installs Tailscale on the Pi. **Sign the Pi in on the TV:** Settings → **Tailscale** → **Sign in**, then scan the code with your phone. The same screen shows whether it's connected, and can turn Tailscale off or on, or sign out.
 
-**Before you take the Pi away from home**, do these once while you're still at home:
+**Moonlight finds your PC over Tailscale by itself.** Moonlight only learns your PC's home-network address, so away from home the PC would show as offline. The Pi fixes this: it looks for each PC you've paired in Moonlight among your Tailscale devices (it asks each one for its ID, the same way Moonlight identifies a PC), and saves the PC's Tailscale address in Moonlight as an extra address. It does this when the Pi starts, whenever the TV menu opens, and right after you sign in to Tailscale, as long as the PC is on and signed in to Tailscale at the time. **Settings → Tailscale** shows whether it's done ("ready away from home"). At home, Moonlight keeps using the local address. It never replaces an address you entered yourself in Moonlight.
 
-1. **Give Moonlight your PC's Tailscale address.** Moonlight only knows the PC's home-network address, so away from home the PC would show as offline. Find the PC's Tailscale address (it starts with `100.`) in the Tailscale app on the PC, or by running `tailscale ip -4` on the PC. Then in Moonlight on the Pi, choose **Add PC manually** and enter it. Moonlight recognises it as the same PC, keeps the pairing, and saves it as an extra address. At home it keeps using the local address.
-2. **Turn off key expiry for the Pi and the PC.** Tailscale signs devices out every 180 days by default, and a Pi that boots into Moonlight is awkward to sign back in. In the [Tailscale admin console](https://login.tailscale.com/admin/machines), open the **…** menu next to each of the two machines and choose **Disable key expiry**.
+**Before you take the Pi away from home**, do this once while you're still at home:
+
+- **Turn off key expiry for the Pi and the PC.** Tailscale signs devices out every 180 days by default, and a Pi that boots into Moonlight is awkward to sign back in. In the [Tailscale admin console](https://login.tailscale.com/admin/machines), open the **…** menu next to each of the two machines and choose **Disable key expiry**.
 
 Away from home:
 
 - **Lower Moonlight's bitrate** (in Moonlight's settings) to below your home connection's *upload* speed, often 20–40 Mbit/s. The 50–100 Mbit/s that works at home will stutter or fail over the internet. Raise it again when you're back home.
-- **VirtualHere won't work away from home.** The VirtualHere client on your PC only finds the Pi on your home network, so a controller plugged into the Pi stays with the Pi and works through Moonlight's own controller support instead (buttons, rumble and usually motion, but not adaptive triggers or HD haptics). That's the better option anyway: VirtualHere over the internet adds input lag and stutter, so don't add the Pi's Tailscale address to VirtualHere.
+- **VirtualHere doesn't work away from home** (unless you turn on [VirtualHere over Tailscale](#virtualhere-over-tailscale-not-recommended), which isn't recommended). A controller plugged into the Pi stays with the Pi and works through Moonlight's own controller support instead (buttons, rumble and usually motion, but not adaptive triggers or HD haptics). That's the better option anyway: VirtualHere over the internet adds input lag and stutter.
 - Run `tailscale ping <pc-name>`. If replies say **"via DERP"**, the connection is relayed, which adds latency. A direct connection is better.
 - Wake-on-LAN from Moonlight won't work over Tailscale. Leave the PC on, or wake it with something that's always on at home.
 
 ### VirtualHere (sharing USB devices with your PC)
 
-[VirtualHere](https://www.virtualhere.com) makes USB devices plugged into the Pi appear on your PC as if they were plugged in directly. A wired DualSense, for example, keeps its native haptics and adaptive triggers.
+[VirtualHere](https://www.virtualhere.com) makes USB devices plugged into the Pi appear on your PC as if they were plugged in directly. A wired DualSense, for example, keeps its native haptics and adaptive triggers. The setup installs the VirtualHere server on the Pi; to use it, set up the client on your PC.
 
 - Set up the **VirtualHere client** on your PC with the [PC setup script](#setting-up-the-gaming-pc), or by hand from https://www.virtualhere.com/usb_client_software
 - In the client, right-click each device that should move to the PC and choose **Auto-Use Device** (the device moves whichever USB port it's in) or **Auto-Use Port** (anything plugged into that port moves). Devices without Auto-Use stay with the Pi. Choosing **Stop using** on a device turns its Auto-Use off, so turn it back on afterwards.
 - The free version shares **one device at a time**. More needs a licence from virtualhere.com.
 - While a device is shared through VirtualHere it belongs to the PC, so Moonlight on the Pi can't see it.
-- **Home network only.** Away from home (over Tailscale), VirtualHere won't find the Pi, and controllers work through Moonlight instead. See [Tailscale](#tailscale-streaming-away-from-home).
+- **Home network only.** Away from home (over Tailscale), controllers work through Moonlight instead. See [Tailscale](#tailscale-streaming-away-from-home).
+- Change these in the TV menu: **Settings → VirtualHere**.
 
-#### Sharing USB devices only while streaming (recommended)
+#### Sending USB devices to the PC only while streaming (recommended)
 
-With this option, a controller plugged into the Pi works in Moonlight's menus between streams, and moves to your PC (with full haptics and adaptive triggers on a DualSense) while you're streaming. The Pi watches Moonlight's log: when a stream starts it switches the VirtualHere server on, and when the stream ends (quit or disconnect) it switches it off, which gives the devices back to the Pi.
+With this setting (on by default; Settings → VirtualHere → **Send USB to PC only while streaming**), a controller plugged into the Pi works in this menu and Moonlight's menus between streams, and VirtualHere sends it to your PC (with full haptics and adaptive triggers on a DualSense) while you're streaming. Turned off, VirtualHere sends USB devices to your PC all the time. The Pi watches Moonlight's log: when a stream starts it switches the VirtualHere server on, and when the stream ends (quit or disconnect) it switches it off, which gives the devices back to the Pi.
 
 On the PC, run the [PC setup script](#setting-up-the-gaming-pc), which keeps the VirtualHere client running and makes it find the Pi quickly. Then start a stream (the Pi's devices only appear in the client while you're streaming) and turn on Auto-Use for the devices that should move, as above.
 
@@ -180,8 +192,13 @@ Then:
 
 - When a stream starts, the controller takes a few seconds to appear on the PC (2–8 seconds in testing). When the stream ends, it's back on the Pi within about 2 seconds.
 - **To end a stream, quit the game or app on the PC** (for example, exit Steam Big Picture), or press Ctrl+Alt+Shift+Q on a keyboard plugged into the Pi. The controller is on the PC during a stream, so Moonlight's controller shortcut (Select+Start+L1+R1) can't reach the Pi.
-- It needs Moonlight to start automatically, because it reads the log that the auto-start writes.
 - To see what it's doing: `journalctl -u moonlight-usb-handoff --no-pager`
+
+#### VirtualHere over Tailscale (not recommended)
+
+VirtualHere's server on the Pi is blocked on the Tailscale network by default (a firewall rule on VirtualHere's port, 7575, on the `tailscale0` network only), so only PCs at home can use the Pi's USB devices. Settings → VirtualHere → **Use VirtualHere over Tailscale** removes the block. It isn't recommended: over the internet VirtualHere adds input lag and stutter, and controllers work better through Moonlight.
+
+If you turn it on anyway, also tell the VirtualHere client on your PC where to find the Pi: right-click **USB Hubs**, choose **Specify Hubs**, and add the Pi's Tailscale address with the port, for example `100.101.102.103:7575` (the menu shows the Pi's address).
 
 ## Setting up the gaming PC
 
@@ -238,7 +255,7 @@ Re-run the script. If it persists, check that `~/.config/moonlight-pi-setup/eglf
 ~/.local/share/moonlight-pi-setup/moonlight-pi-setup.sh --uninstall
 ```
 
-This removes the settings the script added, restores your original `~/.asoundrc` if you had one, puts back how the Pi originally booted, restores the boot options and Wi-Fi power saving, switches VirtualHere back to sharing all the time, removes the TV menu, and removes the quit-on-shutdown service (without quitting a game that's running at the time). It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
+This removes the settings the script added, restores your original `~/.asoundrc` if you had one, puts back how the Pi originally booted, restores the boot options and Wi-Fi power saving, switches VirtualHere back to sharing all the time, removes the TV menu, the settings helper and its sudoers rule, and removes the quit-on-shutdown service (without quitting a game that's running at the time). It asks before uninstalling Moonlight, Tailscale or VirtualHere. Backups stay in `~/.local/share/moonlight-pi-setup/backups`.
 
 ## Known limitations
 
