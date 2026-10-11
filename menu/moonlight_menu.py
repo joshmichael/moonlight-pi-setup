@@ -838,7 +838,7 @@ def net_summary(st):
 
 
 class HomeScreen(ListScreen):
-    title = 'Moonlight'
+    title = 'Menu'
 
     def refresh(self):
         app = self.app
