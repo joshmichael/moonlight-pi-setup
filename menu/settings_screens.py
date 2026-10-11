@@ -47,6 +47,8 @@ DESCRIPTIONS = {
     'updates': 'Update Moonlight and the system, or this setup.',
     'about': 'Network addresses, versions, temperature and power.',
     'quick': 'Go through the first-time questions again: speakers, ending the stream at shutdown, and more.',
+    'uninstall': 'Remove this setup: the TV menu, its settings and auto-start. You can also remove Moonlight, '
+                 'Tailscale and VirtualHere. The Pi then restarts the way it started before the setup.',
 }
 
 
@@ -360,6 +362,8 @@ class SettingsScreen(ListScreen):
                  desc=DESCRIPTIONS['updates']),
             Item('About this Pi', lambda: app.push(AboutScreen(app)), key='about', desc=DESCRIPTIONS['about']),
             Item('Run Quick setup again', lambda: QuickSetup(app).start(), key='quick', desc=DESCRIPTIONS['quick']),
+            Item('Uninstall this setup', lambda: app.push(UninstallScreen(app, st)), key='uninstall', color=BAD,
+                 desc=DESCRIPTIONS['uninstall']),
         ]
         self.list.set_items(items)
 
@@ -788,7 +792,7 @@ class ProgressScreen(Screen):
             self.percent, self.step = prog
             return
         line = ANSI_RE.sub('', line).strip()
-        if not line or line.startswith('{'):
+        if not line or line.startswith('{') or re.match(r'[A-Z_]+=', line):    # JSON, or KEY=value for the menu
             return
         if line.startswith('==> '):
             self.step = line[4:]
@@ -1033,6 +1037,122 @@ class AboutScreen(Screen):
             y = CONTENT_Y + (i % per_col) * 104
             draw_text(surf, label, (x, y), 26, FAINT, bold=True)
             draw_text(surf, value, (x, y + 34), 34, color, max_width=col_w)
+
+
+# ---------------------------------------------------------------------------
+# Uninstall
+# ---------------------------------------------------------------------------
+# (name, status key saying it can be removed, label, description)
+REMOVE_CHOICES = [
+    ('moonlight', 'moonlight_installed', 'Also remove Moonlight',
+     'Uninstalls the Moonlight app. Its settings and pairing with your PC are kept, in case you install it '
+     'again.'),
+    ('tailscale', 'tailscale_by_setup', 'Also remove Tailscale', 'Signs the Pi out of Tailscale and uninstalls it.'),
+    ('virtualhere', 'virtualhere_by_setup', 'Also remove VirtualHere',
+     "Uninstalls the VirtualHere USB server from the Pi. The client on your PC isn't changed."),
+]
+
+
+class UninstallScreen(ListScreen):
+    title = 'Uninstall this setup'
+
+    def __init__(self, app, status):
+        super().__init__(app)
+        self.status = status or {}
+        self.remove = set()
+
+    def refresh(self):
+        items = [Item(label, lambda n=name: self._flip(n), key=name, toggle=name in self.remove, desc=desc)
+                 for name, key, label, desc in REMOVE_CHOICES if self.status.get(key) == '1']
+        items.append(Item('Uninstall', self._confirm, key='go', color=BAD,
+                          desc='Removes this setup, and anything switched on above, then restarts the Pi.'))
+        self.list.set_items(items)
+
+    def _flip(self, name):
+        self.remove ^= {name}
+        self.refresh()
+
+    def _confirm(self):
+        also = [label.split()[-1] for name, _, label, _ in REMOVE_CHOICES if name in self.remove]
+        extra = (', and uninstalls %s' % ' and '.join(also)) if also else ''
+        self.app.confirm('Uninstall this setup?',
+                         'This removes the TV menu, its settings and auto-start%s. The Pi then restarts the way it '
+                         'started before the setup. To set it up again, you\'ll need to run the install command '
+                         'over SSH.' % extra, 'Uninstall', self._go, danger=True, default=1)
+
+    def _go(self):
+        value = ','.join(name for name, _, _, _ in REMOVE_CHOICES if name in self.remove) or 'none'
+        self.app.push(ProgressScreen(self.app, 'Uninstalling', ['uninstall', value], self._done))
+
+    def _done(self, ok, err):
+        if not ok:
+            self.app.message("The uninstall didn't finish",
+                             '%s Finish it over SSH with: ~/.local/share/moonlight-pi-setup/moonlight-pi-setup.sh '
+                             '--uninstall' % err)
+            return
+        self.app.push(UninstalledScreen(self.app))
+
+    def draw_panel(self, surf, rect):
+        y = draw_wrapped(surf, 'What this does', (rect.x, rect.y), rect.width, 36, TEXT, bold=True) + 12
+        for head, body in (
+                ('Removes', 'The TV menu and its settings, auto-start (the Pi stops going straight into Moonlight), '
+                            'and the setup\'s services and boot changes.'),
+                ('Keeps', 'Your Moonlight settings and pairing, and backups of the files the setup changed.'),
+                ('Afterwards', 'The Pi restarts the way it started before the setup: on Raspberry Pi OS Lite, a '
+                               'text login prompt.')):
+            y = draw_text(surf, head, (rect.x, y), 26, FAINT, bold=True).bottom + 4
+            y = draw_wrapped(surf, body, (rect.x, y), rect.width, 28, DIM, line_gap=5) + 16
+        it = self.list.selected
+        if it and it.desc:
+            pygame.draw.line(surf, PANEL_HI, (rect.x, y), (rect.right, y), 2)
+            y += 18
+            draw_wrapped(surf, it.desc, (rect.x, y), rect.width, 28, TEXT, line_gap=5)
+
+
+class UninstalledScreen(Screen):
+    """The last screen: the settings helper restarts the Pi 15 seconds after
+    the uninstall, and there's no menu to go back to."""
+    title = 'Uninstalled'
+
+    def __init__(self, app, seconds=15):
+        super().__init__(app)
+        self.restart_at = time.monotonic() + seconds
+        self.shown = None
+
+    def seconds_left(self):
+        return max(0, int(self.restart_at - time.monotonic() + 0.999))
+
+    def tick(self):
+        left = self.seconds_left()
+        if left != self.shown:
+            self.shown = left
+            return True
+        return False
+
+    def handle(self, action):
+        pass
+
+    def hints(self):
+        return []
+
+    def draw(self, surf):
+        left = pygame.Rect(MARGIN, CONTENT_Y, 600, 600)
+        right_x = MARGIN + 680
+        width = W - MARGIN - right_x
+        pygame.draw.circle(surf, GOOD, left.center, 120)
+        pygame.draw.lines(surf, (255, 255, 255), False, [(left.centerx - 55, left.centery),
+                                                        (left.centerx - 15, left.centery + 45),
+                                                        (left.centerx + 60, left.centery - 45)], 18)
+        y = draw_text(surf, 'This setup has been removed', (right_x, CONTENT_Y), 44, TEXT, bold=True).bottom + 30
+        n = self.seconds_left()
+        y = draw_wrapped(surf, ('The Pi restarts in %d second%s' % (n, '' if n == 1 else 's') if n
+                                else 'Restarting…') + ', the way it started before the setup: on Raspberry Pi OS '
+                         'Lite, a text login prompt.', (right_x, y), width, 32, TEXT, line_gap=8) + 24
+        y = draw_wrapped(surf, 'To set it up again, connect to the Pi over SSH and run the install command from '
+                         'github.com/joshmichael/moonlight-pi-setup.', (right_x, y), width, 30, DIM, line_gap=6) + 24
+        if time.monotonic() - self.restart_at > 45:
+            draw_wrapped(surf, "If the Pi hasn't restarted, unplug it and plug it back in.", (right_x, y), width, 30,
+                         WARN)
 
 
 # ---------------------------------------------------------------------------

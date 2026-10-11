@@ -357,11 +357,13 @@ class App:
         self.dialog = Dialog(title, text, ['OK'])
         self.dirty = True
 
-    def confirm(self, title, text, yes, on_yes, danger=False, no='Cancel'):
+    def confirm(self, title, text, yes, on_yes, danger=False, no='Cancel', default=0):
+        """default=1 highlights the Cancel button first (for things that can't be undone)."""
         def closed(i):
             if i == 0:
                 on_yes()
-        self.dialog = Dialog(title, text, [yes, no], on_close=closed, danger=0 if danger else None)
+        self.dialog = Dialog(title, text, [yes, no], on_close=closed, danger=0 if danger else None,
+                             default=default)
         self.dirty = True
 
     def choose(self, title, text, options, on_choice):
@@ -836,7 +838,7 @@ def net_summary(st):
 
 
 class HomeScreen(ListScreen):
-    title = 'Moonlight'
+    title = 'Menu'
 
     def refresh(self):
         app = self.app
