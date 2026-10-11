@@ -2,8 +2,8 @@
 
 Used with `moonlight_menu.py --fake`. Not installed on the Pi. Set FAKE_NO_PAIRED=1
 to start with no paired controllers (to see auto-pairing), FAKE_QUICK_SETUP=1 to
-start with Quick setup, and FAKE_TAILSCALE to a Tailscale state (Running, Stopped,
-NeedsLogin, or none for not installed).
+start with Quick setup, FAKE_ONLINE=1 to start connected to Wi-Fi, and FAKE_TAILSCALE
+to a Tailscale state (Running, Stopped, NeedsLogin, or none for not installed).
 """
 import os
 import time
@@ -18,7 +18,7 @@ class FakeNetwork:
 
     def __init__(self):
         self.enabled = True
-        self.current = None
+        self.current = 'HomeNet 5G' if os.environ.get('FAKE_ONLINE') else None
         self.saved_list = [{'name': 'Grandma', 'uuid': 'u-grandma', 'ssid': 'Grandma'}]
         self.visible = [
             {'ssid': 'HomeNet 5G', 'signal': 82, 'security': 'WPA2'},

@@ -34,7 +34,7 @@ bash moonlight-pi-setup.sh
 
 Nothing, apart from your password (if `sudo` needs it). It shows a summary and asks **Go ahead?** before changing anything, and offers to reboot at the end. It always installs Moonlight, the [TV menu](#the-tv-menu), [Tailscale](#tailscale-streaming-away-from-home) and [VirtualHere](#virtualhere-sharing-usb-devices-with-your-pc), and the Pi always boots straight into Moonlight.
 
-Everything else is chosen on the TV with a controller. After the restart, **Quick setup** asks for the Wi-Fi country (only if it isn't set yet), your speakers (with a speaker test), whether to end the stream on your PC when the Pi shuts down, hiding boot messages, Wi-Fi power saving (if you're on Wi-Fi) and when VirtualHere sends USB devices to your PC. Until then, the recommended settings are used. You can change any of them later in the menu's **Settings** (see [Settings and Quick setup](#settings-and-quick-setup)).
+Everything else is chosen on the TV with a controller. After the restart, **Quick setup** asks for the Wi-Fi country (only if it isn't set yet), your speakers (with a speaker test), whether to end the stream on your PC when the Pi shuts down, hiding boot messages, Wi-Fi power saving (if you're on Wi-Fi), when VirtualHere sends USB devices to your PC, and whether to sign in to Tailscale now (scan a code with your phone). Until then, the recommended settings are used. You can change any of them later in the menu's **Settings** (see [Settings and Quick setup](#settings-and-quick-setup)).
 
 Running the script again updates or repairs the setup, and keeps your settings as they are.
 
@@ -134,7 +134,7 @@ Notes:
 | **About this Pi** | Network and Tailscale addresses, the command to connect over SSH, versions (this setup, Moonlight and Tailscale), temperature, power supply warnings and free storage |
 | **Run Quick setup again** | Goes through the first-time questions again |
 
-**Quick setup** runs the first time the Pi starts after installing. It asks one question per screen and applies each answer straight away. You can skip it, and run it again from Settings.
+**Quick setup** runs the first time the Pi starts after installing. It asks one question per screen and applies each answer straight away. Questions that don't apply are left out: the Wi-Fi country if it's already set, Wi-Fi power saving on Ethernet, and the Tailscale sign-in if the Pi is already signed in or not connected to the internet. You can skip it, and run it again from Settings.
 
 **Updating this setup** downloads the latest script from GitHub and runs it again with your current settings, without asking any questions. Restart afterwards to finish.
 

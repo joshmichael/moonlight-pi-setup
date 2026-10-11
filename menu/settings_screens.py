@@ -597,10 +597,13 @@ class TailscaleScreen(ListScreen):
 
 
 class TailscaleLoginScreen(Screen):
+    """Signs in to Tailscale (showing a code to scan if needed). Once connected
+    it closes itself and calls on_done()."""
     title = 'Sign in to Tailscale'
 
-    def __init__(self, app):
+    def __init__(self, app, on_done=None):
         super().__init__(app)
+        self.on_done = on_done
         self.state = 'starting'      # starting, url, done, error
         self.url = None
         self.qr = None
@@ -659,6 +662,8 @@ class TailscaleLoginScreen(Screen):
             if now - self.done_at > 2.5 and self.app.top is self:
                 self.app.pop()
                 self.app.show_toast('Tailscale is connected', GOOD)
+                if self.on_done:
+                    self.on_done()
             return False
         if self.state in ('starting', 'url') and not self.polling and now - self.last_poll > 2:
             self.polling = True
@@ -1041,28 +1046,42 @@ class QuickSetup:
         self.quiet_at_start = None
 
     def start(self):
-        self.app.run_task(self.app.settings.status, self._loaded, busy='Getting ready…')
+        app = self.app
+        app.run_task(lambda: (app.settings.status(), app.settings.tailscale_status()), self._loaded,
+                     busy='Getting ready…')
 
     def _loaded(self, res, err):
-        self.status = res or {}
+        self.status, ts = res or ({}, {})
         self.speakers = self.status.get('speakers') if self.status.get('speakers') in settings.SPEAKER_NAMES \
             else 'stereo'
         self.quiet_at_start = self.status.get('quiet_boot')
-        st = self.app.net_status or {}
-        on_ethernet = bool((st.get('ethernet') or {}).get('connected'))
         self.pages = ['welcome']
         # Raspberry Pi OS keeps Wi-Fi off until it knows the country.
         if self.status.get('wifi') == '1' and not self.status.get('wifi_country'):
             self.pages.append('country')
         self.pages += ['speakers', 'test', 'quit', 'quiet']
-        if self.status.get('wifi') == '1' and not on_ethernet:
+        if self.status.get('wifi') == '1':
             self.pages.append('powersave')
         if self.status.get('virtualhere') == '1':
             self.pages.append('usb')
+        if ts.get('installed') and ts.get('state') in ('NeedsLogin', 'NoState'):
+            self.pages.append('tailscale')
         self.pages.append('done')
         self.show(0)
 
+    def skip(self, name):
+        """Questions that turn out not to apply by the time they're reached (the
+        network often isn't up yet when Quick setup starts)."""
+        st = self.app.net_status or {}
+        if name == 'powersave':
+            return bool((st.get('ethernet') or {}).get('connected'))
+        if name == 'tailscale':
+            return not self.app.online()     # signing in needs the internet
+        return False
+
     def show(self, i):
+        while self.skip(self.pages[i]):
+            del self.pages[i]                # so the later steps are numbered right
         self.app.push(self.page(i))
 
     def page(self, i):
@@ -1129,6 +1148,15 @@ class QuickSetup:
                                             "they're on your PC.", 'Recommended'),
                                            ('off', 'All the time', 'They stay on your PC, even between streams.', '')],
                                   initial=on_off(st.get('usb_handoff', '1') == '1'), **kw)
+        if name == 'tailscale':
+            return QuickSetupPage(self, i, heading='Stream away from home?',
+                                  intro='Tailscale lets you stream from your PC when you take the Pi somewhere else. '
+                                        'Sign the Pi in with your phone; it takes a minute. You can also do it later '
+                                        'in Settings > Tailscale.',
+                                  options=[('signin', 'Sign in to Tailscale', 'Scan a code with your phone and sign '
+                                            'in. Use the same account as on your gaming PC, or create a free one.', ''),
+                                           ('later', 'Not now', 'Sign in any time in Settings > Tailscale.', '')],
+                                  **kw)
         restart = self.restart_needed()
         options = [('finish', 'Finish', '', '')]
         if restart:
@@ -1177,6 +1205,12 @@ class QuickSetup:
         elif name == 'test':
             if value == 'play':
                 play_speaker_test(app, self.speakers)
+            else:
+                next_page()
+        elif name == 'tailscale':
+            if value == 'signin':
+                # Backing out of the sign-in returns here, to try again or choose Not now.
+                app.push(TailscaleLoginScreen(app, on_done=next_page))
             else:
                 next_page()
         elif name in ('quit', 'quiet', 'powersave', 'usb'):
