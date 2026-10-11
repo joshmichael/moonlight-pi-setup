@@ -15,7 +15,7 @@
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$PcSetupVersion = '1.0.0'
+$PcSetupVersion = '1.0.1'
 $IssuesUrl = 'https://github.com/joshmichael/moonlight-pi-setup/issues'
 
 $VhDownloadUrl = 'https://www.virtualhere.com/sites/default/files/usbclient/vhui64.exe'
@@ -233,8 +233,8 @@ function Install-Tailscale {
         Write-Ok 'Tailscale is already installed'
         return
     }
-    Write-Info 'Tailscale lets you stream when you are away from home. Only install it if you'
-    Write-Info 'also installed it on the Pi.'
+    Write-Info 'Tailscale lets you stream when you are away from home. The Pi already has it;'
+    Write-Info 'install it here too if you want to stream from somewhere else.'
     if (-not (Read-YesNo 'Install Tailscale?' $false)) { return }
 
     if (Get-Command winget -ErrorAction SilentlyContinue) {
@@ -282,5 +282,4 @@ function Invoke-MoonlightPcSetup {
     Write-Info 'From then on it moves to this PC by itself whenever you stream.'
 }
 
-# Set MPS_PC_SETUP_NO_MAIN=1 to load the functions without running (for testing).
-if (-not $env:MPS_PC_SETUP_NO_MAIN) { Invoke-MoonlightPcSetup }
+Invoke-MoonlightPcSetup
