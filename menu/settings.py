@@ -6,6 +6,7 @@ rule allows exactly that helper without a password) for the settings that
 need it.
 """
 import glob
+import ipaddress
 import json
 import os
 import re
@@ -13,13 +14,19 @@ import shutil
 import socket
 import subprocess
 import threading
+import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 HELPER = '/usr/local/lib/moonlight-pi-setup/moonlight-settings'
 STATE_FILE = os.path.expanduser('~/.local/share/moonlight-pi-setup/state')
 COUNTRIES = '/usr/share/zoneinfo/iso3166.tab'
 ZONES = '/usr/share/zoneinfo/zone1970.tab'
 LATEST_SCRIPT_URL = 'https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/moonlight-pi-setup.sh'
+
+MOONLIGHT_CONF = os.path.expanduser('~/.config/Moonlight Game Streaming Project/Moonlight.conf')
+TAILSCALE_V4 = ipaddress.ip_network('100.64.0.0/10')
+HOST_OS = ('windows', 'linux', 'macos')       # where a streaming host can run
 
 SPEAKER_NAMES = {'stereo': 'Stereo', '5.1': '5.1 surround', '7.1': '7.1 surround'}
 SPEAKER_CHANNELS = {'stereo': 2, '5.1': 6, '7.1': 8}
@@ -128,6 +135,82 @@ def guess_country():
     except (OSError, subprocess.SubprocessError):
         pass
     return ''
+
+
+# ---------------------------------------------------------------------------
+# Moonlight's saved PCs, and their Tailscale addresses
+# ---------------------------------------------------------------------------
+def moonlight_hosts(path=MOONLIGHT_CONF):
+    """The PCs saved in Moonlight's settings ([hosts] section), as dicts of
+    their keys (index, hostname, uuid, localport, manualaddress, ...)."""
+    hosts = {}
+    section = None
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            for line in f:
+                line = line.rstrip('\n')
+                if line.startswith('['):
+                    section = line.strip('[]')
+                    continue
+                key, sep, value = line.partition('=')
+                m = re.match(r'(\d+)\\([a-z]+)$', key)
+                if section == 'hosts' and sep and m:
+                    hosts.setdefault(m.group(1), {'index': m.group(1)})[m.group(2)] = value.strip('"')
+    except OSError:
+        return []
+    return [h for h in hosts.values() if h.get('uuid')]
+
+
+def is_tailscale_ip(addr):
+    try:
+        return ipaddress.ip_address(addr) in TAILSCALE_V4
+    except ValueError:
+        return False
+
+
+def host_uniqueid(ip, port, timeout=2.5):
+    """The ID a streaming host (Sunshine, Apollo, ...) reports: the same
+    request Moonlight makes to identify a PC."""
+    try:
+        with urllib.request.urlopen('http://%s:%d/serverinfo' % (ip, port), timeout=timeout) as r:
+            m = re.search(rb'<uniqueid>([^<]*)</uniqueid>', r.read(65536))
+            return m.group(1).decode(errors='replace') if m else ''
+    except (OSError, ValueError):
+        return ''
+
+
+def set_moonlight_manual_address(index, ip, port, path=MOONLIGHT_CONF):
+    """Sets a saved PC's manual address in Moonlight's settings, leaving the
+    rest of the file as it is."""
+    with open(path, encoding='utf-8', errors='surrogateescape', newline='') as f:
+        lines = f.read().split('\n')
+    want = {'%s\\manualaddress' % index: ip, '%s\\manualport' % index: str(port)}
+    section, last = None, None
+    for i, line in enumerate(lines):
+        if line.startswith('['):
+            section = line.strip()
+            continue
+        if section == '[hosts]':
+            if line.strip():
+                last = i
+            key = line.partition('=')[0]
+            if key in want:
+                lines[i] = '%s=%s' % (key, want.pop(key))
+    if want:
+        if last is None:
+            raise SettingsError("Moonlight hasn't saved any PCs yet.")
+        lines[last + 1:last + 1] = ['%s=%s' % kv for kv in want.items()]
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8', errors='surrogateescape', newline='') as f:
+        f.write('\n'.join(lines))
+    os.replace(tmp, path)
+
+
+def moonlight_running():
+    try:
+        return subprocess.run(['pgrep', '-x', 'moonlight-qt'], capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +335,69 @@ class Settings:
         """cmd: down or logout. (Signing in streams its output: see stream().)"""
         with self.lock:
             return self._run(['tailscale', cmd], root=True, timeout=60)
+
+    def moonlight_hosts(self):
+        return moonlight_hosts()
+
+    def moonlight_tailscale_sync(self, wait=0):
+        """Gives each PC saved in Moonlight its Tailscale address (as the PC's
+        manual address), so Moonlight can reach it away from home. Waits up to
+        `wait` seconds for Tailscale to connect. Returns [(PC name, address)]
+        for the PCs it changed."""
+        if moonlight_running():
+            return []       # Moonlight saves its settings when it closes, which would undo this
+        hosts = moonlight_hosts()
+        if not hosts or not shutil.which('tailscale'):
+            return []
+        end = time.monotonic() + wait
+        while True:
+            try:
+                p = subprocess.run(['tailscale', 'status', '--json'], capture_output=True, text=True, timeout=10)
+                d = json.loads(p.stdout or '{}')
+            except (OSError, ValueError, subprocess.SubprocessError):
+                d = {}
+            if d.get('BackendState') == 'Running' or time.monotonic() >= end:
+                break
+            time.sleep(1.5)
+        if d.get('BackendState') != 'Running':
+            return []
+        peers = []
+        for peer in (d.get('Peer') or {}).values():
+            ips = [ip for ip in peer.get('TailscaleIPs') or [] if is_tailscale_ip(ip)]
+            if ips:
+                peers.append({'name': (peer.get('HostName') or '').lower(), 'ip': ips[0],
+                              'online': bool(peer.get('Online')), 'os': (peer.get('OS') or '').lower()})
+        known = {p['ip'] for p in peers}
+        changed = []
+        for h in hosts:
+            current = h.get('manualaddress', '')
+            if current and (not is_tailscale_ip(current) or current in known):
+                continue    # an address you entered yourself, or already the PC's Tailscale address
+            port = int(h.get('localport') or 0) or 47989
+            name = h.get('hostname', '').lower()
+            # The PC with the same name first, then any other computer on Tailscale.
+            candidates = [p for p in peers if p['online'] and (p['name'] == name or p['os'] in HOST_OS)]
+            candidates.sort(key=lambda p: p['name'] != name)
+            ip = self._find_host(h['uuid'], candidates[:12], port)
+            if ip:
+                set_moonlight_manual_address(h['index'], ip, port)
+                changed.append((h.get('hostname') or 'Your PC', ip))
+        return changed
+
+    @staticmethod
+    def _find_host(uuid, candidates, port):
+        """The address of the candidate whose streaming host has this ID."""
+        if not candidates:
+            return None
+        if host_uniqueid(candidates[0]['ip'], port).lower() == uuid.lower():
+            return candidates[0]['ip']
+        rest = candidates[1:]
+        if rest:
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                for p, uid in zip(rest, pool.map(lambda p: host_uniqueid(p['ip'], port), rest)):
+                    if uid.lower() == uuid.lower():
+                        return p['ip']
+        return None
 
     # -- updates ---------------------------------------------------------------
     def check_updates(self):

@@ -234,6 +234,20 @@ class FakeSettings:
         time.sleep(0.5)
         self.ts['state'] = 'Stopped' if cmd == 'down' else 'NeedsLogin'
 
+    synced = False
+
+    def moonlight_hosts(self):
+        return [{'index': '1', 'hostname': 'Josh-PC', 'uuid': 'BF6327AA',
+                 'manualaddress': '100.82.98.15' if self.synced else ''}]
+
+    def moonlight_tailscale_sync(self, wait=0):
+        """Set FAKE_SYNC=1 to find the PC (after a couple of seconds)."""
+        if self.synced or not os.environ.get('FAKE_SYNC') or self.ts.get('state') != 'Running':
+            return []
+        time.sleep(2)
+        self.synced = True
+        return [('Josh-PC', '100.82.98.15')]
+
     def stream(self, args, on_line, root=True):
         if args == ['tailscale', 'up']:
             time.sleep(1)

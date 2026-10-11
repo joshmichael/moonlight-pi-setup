@@ -498,6 +498,7 @@ class TailscaleScreen(ListScreen):
     def __init__(self, app):
         super().__init__(app)
         self.ts = None
+        self.hosts = []
         self.loading = False
         self.last = 0
 
@@ -509,11 +510,12 @@ class TailscaleScreen(ListScreen):
             return
         self.loading = True
         self.last = time.monotonic()
-        self.app.run_task(self.app.settings.tailscale_status, self._loaded)
+        app = self.app
+        app.run_task(lambda: (app.settings.tailscale_status(), app.settings.moonlight_hosts()), self._loaded)
 
     def _loaded(self, res, err):
         self.loading = False
-        self.ts = res or {'installed': False}
+        self.ts, self.hosts = res or ({'installed': False}, [])
         self.refresh()
 
     def tick(self):
@@ -581,17 +583,36 @@ class TailscaleScreen(ListScreen):
         text, color = tailscale_summary(ts)
         dot(surf, color or DIM, (rect.x + 10, y + 21), 9)
         y = draw_text(surf, text, (rect.x + 36, y), 34, TEXT, bold=True).bottom + 20
-        for label, value in (('Address', ts.get('ip')), ('Device name', ts.get('name')),
-                             ('Account', ts.get('tailnet'))):
-            if value and ts.get('state') == 'Running':
+        running = ts.get('state') == 'Running'
+        for label, value in (('Address', ts.get('ip')), ('Account', ts.get('tailnet'))):
+            if value and running:
                 draw_text(surf, label, (rect.x, y), 26, FAINT, bold=True)
                 draw_text(surf, value, (rect.x, y + 32), 30, TEXT, max_width=rect.width)
                 y += 84
-        y += 10
-        y = draw_wrapped(surf, "Tailscale lets you stream when you're away from home. Install it on your gaming PC "
-                         'too, signed in to the same account.', (rect.x, y), rect.width, 28, DIM, line_gap=6) + 14
-        y = draw_wrapped(surf, "Away from home, add your PC in Moonlight using its Tailscale address (100.x.x.x), "
-                         'and lower the bitrate.', (rect.x, y), rect.width, 28, DIM, line_gap=6) + 14
+        if running:
+            # Moonlight gets each PC's Tailscale address by itself (see moonlight_tailscale_sync).
+            y = draw_text(surf, 'Your PC in Moonlight', (rect.x, y), 26, FAINT, bold=True).bottom + 10
+            if not self.hosts:
+                y = draw_wrapped(surf, 'Pair your PC in Moonlight first.', (rect.x, y), rect.width, 28, DIM) + 14
+            missing = False
+            for h in self.hosts[:3]:
+                ready = settings.is_tailscale_ip(h.get('manualaddress', ''))
+                missing = missing or not ready
+                dot(surf, GOOD if ready else WARN, (rect.x + 10, y + 19), 8)
+                draw_text(surf, '%s: %s' % (h.get('hostname') or 'PC', 'ready away from home' if ready
+                                            else 'not found on Tailscale yet'),
+                          (rect.x + 32, y), 28, TEXT, max_width=rect.width - 32)
+                y += 44
+            if missing:
+                y = draw_wrapped(surf, 'Switch the PC on, signed in to Tailscale, and the Pi adds it by itself.',
+                                 (rect.x, y), rect.width, 26, FAINT, line_gap=4) + 6
+            y += 16
+        else:
+            y = draw_wrapped(surf, "Tailscale lets you stream when you're away from home. Install it on your gaming "
+                             'PC too, signed in to the same account.', (rect.x, y), rect.width, 28, DIM,
+                             line_gap=6) + 14
+        y = draw_wrapped(surf, "Away from home, lower Moonlight's bitrate.", (rect.x, y), rect.width, 28, DIM,
+                         line_gap=6) + 14
         draw_wrapped(surf, 'VirtualHere only works at home, unless it\'s allowed in Settings > VirtualHere (not '
                      'recommended).', (rect.x, y), rect.width, 28, FAINT)
 
@@ -662,6 +683,7 @@ class TailscaleLoginScreen(Screen):
             if now - self.done_at > 2.5 and self.app.top is self:
                 self.app.pop()
                 self.app.show_toast('Tailscale is connected', GOOD)
+                self.app.sync_moonlight_tailscale(wait=10)
                 if self.on_done:
                     self.on_done()
             return False

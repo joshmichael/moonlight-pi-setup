@@ -969,8 +969,8 @@ finish_install() {
   info "  irm ${PC_SCRIPT_URL} | iex"
   info "It sets up the VirtualHere client (downloads it, starts it with Windows, and"
   info "makes it find the Pi quickly) and can install Tailscale."
-  info "Tailscale: sign the Pi in on the TV (Settings > Tailscale). Away from home, add"
-  info "the PC in Moonlight using its Tailscale address (100.x.x.x) and lower the bitrate."
+  info "Tailscale: sign the Pi in on the TV (Settings > Tailscale). Moonlight then finds"
+  info "the PC over Tailscale by itself. Away from home, lower Moonlight's bitrate."
   info "VirtualHere: in the client on your PC, right-click each device that should move"
   info "to the PC and choose Auto-Use Device or Auto-Use Port."
   if (( OPT_USB_HANDOFF )); then

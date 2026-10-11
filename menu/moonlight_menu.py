@@ -694,6 +694,18 @@ class App:
                 # Raspberry Pi OS keeps Wi-Fi off until it knows the country.
                 self.push(CountryScreen(self, '', on_changed=lambda: self.push(PhoneSetupScreen(self))))
 
+    def sync_moonlight_tailscale(self, wait=15):
+        """In the background, gives the PCs saved in Moonlight their Tailscale
+        addresses, so Moonlight can reach them away from home."""
+        def done(res, err):
+            if err:
+                log.warning('Tailscale addresses for Moonlight: %s', err)
+            elif res:
+                names = ' and '.join(name for name, _ in res)
+                self.show_toast("Added %s's Tailscale address to Moonlight" % names, GOOD, 5)
+                self.top.refresh()
+        self.run_task(lambda: self.settings.moonlight_tailscale_sync(wait), done)
+
     def run(self):
         pg = self.pg
         self.push(HomeScreen(self))
@@ -702,6 +714,7 @@ class App:
         else:
             self._offline_screens()
         threading.Thread(target=self._poll_loop, daemon=True).start()
+        self.sync_moonlight_tailscale()
         started = time.monotonic()
         autopair_checked = False
         fps_log = [] if os.environ.get('MENU_DEBUG_FPS') else None   # logs the frame rate
@@ -1556,6 +1569,13 @@ def main():
         import network
         reason = boot_decision(network.Network())
         if reason is None:
+            # Quick when there's nothing to do; only looks for the PC when Moonlight
+            # doesn't have its Tailscale address yet.
+            try:
+                for name, ip in settings.Settings().moonlight_tailscale_sync():
+                    log.info("boot: added %s's Tailscale address (%s) to Moonlight", name, ip)
+            except Exception as e:
+                log.warning('boot: Tailscale addresses for Moonlight: %s', e)
             log.info('boot: online with a controller, starting Moonlight')
             return EXIT_MOONLIGHT
         log.info('boot: opening the menu (%s)', reason)

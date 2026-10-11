@@ -126,7 +126,7 @@ Notes:
 | **Speakers** | Stereo, 5.1 or 7.1 surround (7.1 is experimental), and a speaker test where each speaker says where it is. Moonlight's own audio setting is changed to match |
 | **End stream on PC at shutdown** | See [End the stream when the Pi is switched off](#end-the-stream-when-the-pi-is-switched-off). On by default |
 | **VirtualHere** | Only shown with VirtualHere. **Send USB to PC only while streaming** (on by default; see [Sending USB devices to the PC only while streaming](#sending-usb-devices-to-the-pc-only-while-streaming-recommended)), and **Use VirtualHere over Tailscale** (off by default, not recommended; see [VirtualHere over Tailscale](#virtualhere-over-tailscale-not-recommended)) |
-| **Tailscale** | Shows whether Tailscale is connected, and its address. Sign in by scanning a code with your phone, turn it off or on, or sign out. If Tailscale isn't installed, it can install it |
+| **Tailscale** | Shows whether Tailscale is connected, its address, and whether Moonlight can reach your PC over Tailscale (the Pi adds the PC's Tailscale address to Moonlight by itself). Sign in by scanning a code with your phone, turn it off or on, or sign out. If Tailscale isn't installed, it can install it |
 | **Wi-Fi power saving** | Only shown on a Pi with Wi-Fi. Power saving can make Wi-Fi doze between packets, which can cause stutter and lag spikes when streaming. Off by default, and keeping it off is recommended |
 | **Wi-Fi country** | Which country's Wi-Fi channels the Pi uses. Raspberry Pi OS keeps Wi-Fi off until it's set, so Quick setup asks for it if it isn't set yet, and so does the menu before Wi-Fi setup from a phone |
 | **Hide boot messages** | Hides the text and the splash screen while the Pi starts. Takes effect after a restart, which the menu offers. On by default |
@@ -158,10 +158,11 @@ With this setting (on by default; Settings → **End stream on PC at shutdown**)
 - Install Tailscale on your **gaming PC** too, signed in to the same account. The [PC setup script](#setting-up-the-gaming-pc) can do this.
 - The setup installs Tailscale on the Pi. **Sign the Pi in on the TV:** Settings → **Tailscale** → **Sign in**, then scan the code with your phone. The same screen shows whether it's connected, and can turn Tailscale off or on, or sign out.
 
-**Before you take the Pi away from home**, do these once while you're still at home:
+**Moonlight finds your PC over Tailscale by itself.** Moonlight only learns your PC's home-network address, so away from home the PC would show as offline. The Pi fixes this: it looks for each PC you've paired in Moonlight among your Tailscale devices (it asks each one for its ID, the same way Moonlight identifies a PC), and saves the PC's Tailscale address in Moonlight as an extra address. It does this when the Pi starts, whenever the TV menu opens, and right after you sign in to Tailscale, as long as the PC is on and signed in to Tailscale at the time. **Settings → Tailscale** shows whether it's done ("ready away from home"). At home, Moonlight keeps using the local address. It never replaces an address you entered yourself in Moonlight.
 
-1. **Give Moonlight your PC's Tailscale address.** Moonlight only knows the PC's home-network address, so away from home the PC would show as offline. Find the PC's Tailscale address (it starts with `100.`) in the Tailscale app on the PC, or by running `tailscale ip -4` on the PC. Then in Moonlight on the Pi, choose **Add PC manually** and enter it. Moonlight recognises it as the same PC, keeps the pairing, and saves it as an extra address. At home it keeps using the local address.
-2. **Turn off key expiry for the Pi and the PC.** Tailscale signs devices out every 180 days by default, and a Pi that boots into Moonlight is awkward to sign back in. In the [Tailscale admin console](https://login.tailscale.com/admin/machines), open the **…** menu next to each of the two machines and choose **Disable key expiry**.
+**Before you take the Pi away from home**, do this once while you're still at home:
+
+- **Turn off key expiry for the Pi and the PC.** Tailscale signs devices out every 180 days by default, and a Pi that boots into Moonlight is awkward to sign back in. In the [Tailscale admin console](https://login.tailscale.com/admin/machines), open the **…** menu next to each of the two machines and choose **Disable key expiry**.
 
 Away from home:
 
