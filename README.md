@@ -133,6 +133,7 @@ Notes:
 | **Updates** | Checks for and installs new versions of Moonlight and Raspberry Pi OS (like `sudo apt full-upgrade`), and updates this setup from GitHub, keeping your settings |
 | **About this Pi** | Network and Tailscale addresses, the command to connect over SSH, versions (this setup, Moonlight and Tailscale), temperature, power supply warnings and free storage |
 | **Run Quick setup again** | Goes through the first-time questions again |
+| **Uninstall this setup** | See [Uninstalling](#uninstalling) |
 
 **Quick setup** runs the first time the Pi starts after installing. It asks one question per screen and applies each answer straight away. Questions that don't apply are left out: the Wi-Fi country if it's already set, Wi-Fi power saving on Ethernet, and the Tailscale sign-in if the Pi is already signed in or not connected to the internet. You can skip it, and run it again from Settings.
 
@@ -250,6 +251,10 @@ iperf3 -c <PC_IP> -R -u -b 500M -t 15   # "Lost/Total" should be close to 0%
 Re-run the script. If it persists, check that `~/.config/moonlight-pi-setup/eglfs.json` exists and that `echo $QT_QPA_EGLFS_KMS_CONFIG` prints its path when you log in on the TV.
 
 ## Uninstalling
+
+On the TV: **Settings → Uninstall this setup**. Choose whether to also remove Moonlight, Tailscale and VirtualHere (Tailscale and VirtualHere are only offered if the setup installed them), then **Uninstall**. The Pi restarts when it's done.
+
+Or over SSH:
 
 ```bash
 ~/.local/share/moonlight-pi-setup/moonlight-pi-setup.sh --uninstall

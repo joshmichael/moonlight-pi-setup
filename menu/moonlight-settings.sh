@@ -22,6 +22,8 @@
 #   tailscale install|up|down|logout
 #   updates check|install        Moonlight and system updates (apt)
 #   update-setup                 download the latest moonlight-pi-setup and run it
+#   uninstall none|LIST          uninstall the setup, then restart the Pi. LIST also
+#                                removes any of: moonlight,tailscale,virtualhere
 #
 set -Eeuo pipefail
 umask 022
@@ -30,6 +32,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 RAW_SCRIPT_URL="https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/moonlight-pi-setup.sh"
 TAILSCALE_INSTALL_SCRIPT="https://tailscale.com/install.sh"
 
+LIB_DIR="/usr/local/lib/moonlight-pi-setup"
 ROOT_STATE_DIR="/var/lib/moonlight-pi-setup"
 ROOT_STATE="${ROOT_STATE_DIR}/state"
 BACKUP_DIR="${ROOT_STATE_DIR}/backups"
@@ -182,6 +185,12 @@ cmd_status() {
   say "wifi_powersave=$([[ -f $NM_WIFI_CONF ]] && echo 0 || echo 1)"
   say "wifi_country=${country}"
   say "tailscale=$(command -v tailscale > /dev/null && echo 1 || echo 0)"
+  # What the uninstall can also remove: Moonlight, and Tailscale and VirtualHere
+  # if the setup installed them.
+  local ustate="${USER_HOME}/.local/share/moonlight-pi-setup/state"
+  say "moonlight_installed=$(dpkg-query -W -f='${Status}' moonlight-qt 2> /dev/null | grep -q 'install ok installed' && echo 1 || echo 0)"
+  say "tailscale_by_setup=$(command -v tailscale > /dev/null && { [[ $(kv_get "$ustate" tailscale_installed_by_script) == 1 ]] || [[ $(kv_get "$ROOT_STATE" tailscale_installed_by_script) == 1 ]]; } && echo 1 || echo 0)"
+  say "virtualhere_by_setup=$(virtualhere_installed && [[ $(kv_get "$ustate" virtualhere_installed_by_script) == 1 ]] && echo 1 || echo 0)"
 }
 
 # ---------------------------------------------------------------------------
@@ -828,6 +837,35 @@ cmd_update_setup() {
     bash "$file" --unattended
 }
 
+# Runs the setup's own uninstall, from the copy only root can change (kept in
+# LIB_DIR by the setup), then restarts the Pi: the uninstall removes the TV
+# menu, so the Pi can't go back to it.
+cmd_uninstall() {
+  load_user
+  local list=${1:-none} item items=() args=() script="${LIB_DIR}/moonlight-pi-setup.sh"
+  IFS=',' read -ra items <<<"$list"
+  for item in "${items[@]}"; do
+    case "$item" in
+      none) ;;
+      moonlight|tailscale|virtualhere) args+=("--remove-${item}") ;;
+      *) die "Use: uninstall none, or any of moonlight,tailscale,virtualhere" ;;
+    esac
+  done
+  if [[ ! -f $script ]]; then
+    # Set up before that copy was kept: use the latest version from GitHub.
+    say "Downloading the setup script…"
+    script=$(mktemp /tmp/moonlight-pi-setup-uninstall.XXXXXX)
+    curl -fsSL "$RAW_SCRIPT_URL" -o "$script" || die "Couldn't download the setup script. Is the Pi connected to the internet?"
+    bash -n "$script" || die "The downloaded setup script looks damaged. Try again later."
+  fi
+  cd /
+  env -i PATH="$PATH" HOME="$USER_HOME" LANG=C.UTF-8 TERM=dumb MOONLIGHT_PI_USER="$USER_NAME" \
+    bash "$script" --uninstall --unattended "${args[@]}" || die "The uninstall didn't finish."
+  systemd-run --quiet --on-active=15 --timer-property=AccuracySec=1s /usr/bin/systemctl reboot \
+    || die "Uninstalled, but couldn't restart the Pi. Restart it yourself."
+  say "RESTART=15"
+}
+
 # ---------------------------------------------------------------------------
 main() {
   local cmd=${1:-} value=${2:-}
@@ -847,6 +885,8 @@ main() {
     updates) require_root; lock; cmd_updates "$value" ;;
     # No lock: the setup script it runs uses this helper itself.
     update-setup) require_root; cmd_update_setup ;;
+    # No lock: the uninstall uses this helper itself.
+    uninstall) require_root; cmd_uninstall "$value" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;
   esac

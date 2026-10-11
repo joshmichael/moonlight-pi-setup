@@ -184,7 +184,8 @@ class FakeSettings:
     def __init__(self):
         self.st = {'speakers': '5.1', 'quit_on_shutdown': '1', 'virtualhere': '1', 'usb_handoff': '1',
                    'vh_tailscale': '0', 'vh_port': '7575', 'quiet_boot': '1', 'wifi': '1', 'wifi_powersave': '0',
-                   'wifi_country': '' if os.environ.get('FAKE_NO_COUNTRY') else 'GB', 'tailscale': '1'}
+                   'wifi_country': '' if os.environ.get('FAKE_NO_COUNTRY') else 'GB', 'tailscale': '1',
+                   'moonlight_installed': '1', 'tailscale_by_setup': '1', 'virtualhere_by_setup': '1'}
         self.pending = bool(os.environ.get('FAKE_QUICK_SETUP'))
         state = os.environ.get('FAKE_TAILSCALE', 'Running')
         self.ts = {'installed': state != 'none', 'state': state if state != 'none' else '',
@@ -270,6 +271,14 @@ class FakeSettings:
                 if i % 6 == 0:
                     on_line('Unpacking %s ...' % pkgs[i // 20])
                 time.sleep(0.1)
+            return True, ''
+        if args[0] == 'uninstall':
+            for line in ('==> Uninstalling moonlight-pi-setup', '    [OK] Removed Moonlight settings from '
+                         '/home/pi/.bash_profile', '    [OK] Turned off automatic console login',
+                         '    [OK] Removed the TV menu and its settings helper',
+                         '    (also removing: %s)' % args[1], '    [OK] Uninstalled', 'RESTART=15'):
+                on_line(line)
+                time.sleep(0.6)
             return True, ''
         if args == ['update-setup']:
             for line in ('Downloading the latest version…', 'Installing version 1.9.0…', '==> Checking your system',
