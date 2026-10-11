@@ -1,4 +1,4 @@
-"""Settings, Quick setup, Tailscale, Updates and About screens for the menu."""
+"""Settings, Quick setup, Tailscale, Updates, About and Uninstall screens for the menu."""
 import collections
 import getpass
 import re
@@ -9,10 +9,10 @@ import pygame
 
 import settings
 import ui
-from ui import (W, MARGIN, CONTENT_Y, FOOTER_Y, PANEL_HI, ACCENT, TEXT, DIM, FAINT, GOOD, WARN, BAD,
-                Item, ListScreen, Screen, draw_text, draw_wrapped, rrect, dot)
+from ui import (W, H, MARGIN, CONTENT_Y, FOOTER_Y, BACK, PANEL, PANEL_HI, ACCENT, TEXT, DIM, FAINT, GOOD, WARN,
+                BAD, Item, ListScreen, Screen, draw_text, draw_wrapped, rrect, dot)
 
-ISSUES_URL = 'github.com/joshmichael/moonlight-pi-setup/issues'
+REPO = 'github.com/joshmichael/moonlight-pi-setup'
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 
 SPEAKER_OPTIONS = [
@@ -38,7 +38,6 @@ DESCRIPTIONS = {
                     'through Moonlight. Off: VirtualHere only works at home.',
     'tailscale': 'Stream when you\'re away from home: see whether Tailscale is connected, sign in with your '
                  'phone, or turn it off.',
-    'tailscale_install': 'Tailscale lets you stream when you\'re away from home. It\'s free for personal use.',
     'powersave': 'Power saving can make Wi-Fi doze between packets, which can cause stutter and lag spikes when '
                  'streaming. Keeping this off is recommended.',
     'country': 'Wi-Fi uses different channels in each country. The Pi needs to know where it is to find every '
@@ -56,9 +55,15 @@ def on_off(v):
     return 'on' if v else 'off'
 
 
-# ---------------------------------------------------------------------------
-# Speaker test (Settings and Quick setup)
-# ---------------------------------------------------------------------------
+def describe(surf, rect, it, size=30):
+    """The highlighted item's name and description, at the top of the panel.
+    Returns the y below them."""
+    y = draw_wrapped(surf, it.label, (rect.x, rect.y), rect.width, 36, TEXT, bold=True) + 12
+    if it.desc:
+        y = draw_wrapped(surf, it.desc, (rect.x, y), rect.width, size, DIM, line_gap=6) + 20
+    return y
+
+
 def play_speaker_test(app, mode):
     if mode not in settings.SPEAKER_CHANNELS:
         mode = 'stereo'
@@ -67,7 +72,7 @@ def play_speaker_test(app, mode):
         if i == 1:
             app.message('Speakers in the wrong place',
                         'Check each speaker is plugged into the right output on your receiver or TV. If they are, '
-                        'please report it, with your TV and receiver models, at %s' % ISSUES_URL)
+                        'please report it, with your TV and receiver models, at %s/issues' % REPO)
 
     def done(res, err):
         if err:
@@ -79,8 +84,7 @@ def play_speaker_test(app, mode):
             return
         app.choose('Did each speaker say the right place?',
                    '"Front left" should come from the front left speaker, and so on.', ['Yes', 'No'], wrong)
-    app.run_task(lambda: app.settings.speaker_test(mode), done,
-                 busy='Speaker test: each speaker says where it is…')
+    app.run_task(lambda: settings.speaker_test(mode), done, busy='Speaker test: each speaker says where it is…')
 
 
 # ---------------------------------------------------------------------------
@@ -118,8 +122,7 @@ class ChoiceScreen(ListScreen):
             self.placed = True
             for i, it in enumerate(items):
                 if it.key == self.initial:
-                    self.list.index = i
-                    self.list._clamp_scroll()
+                    self.list.select(i)
 
     def extra_items(self):
         return []
@@ -130,9 +133,7 @@ class ChoiceScreen(ListScreen):
     def handle(self, action):
         # Long lists (countries) page up and down with left/right or the shoulder buttons.
         if self.long() and action in ('left', 'lb', 'right', 'rb'):
-            d = -1 if action in ('left', 'lb') else 1
-            self.list.index = max(0, min(len(self.list.items) - 1, self.list.index + d * self.list.visible_count()))
-            self.list._clamp_scroll()
+            self.list.page(-1 if action in ('left', 'lb') else 1)
         else:
             super().handle(action)
 
@@ -169,7 +170,7 @@ class SpeakersScreen(ChoiceScreen):
         self.on_changed = on_changed
 
     def extra_items(self):
-        return [Item('Play a speaker test', self._test, key='test',
+        return [Item('Play a speaker test', lambda: play_speaker_test(self.app, self.current), key='test',
                      desc='Each speaker says where it is, for example "Front left". Make sure the TV (and '
                           'receiver, if you have one) is on.')]
 
@@ -188,51 +189,15 @@ class SpeakersScreen(ChoiceScreen):
             app.show_toast('Speakers: %s' % settings.SPEAKER_NAMES[mode], GOOD)
             if self.on_changed:
                 self.on_changed()
-        app.run_task(lambda: app.settings.speakers(mode), done, busy='Changing the speakers…')
-
-    def _test(self):
-        play_speaker_test(self.app, self.current)
+        app.run_task(lambda: settings.set_speakers(mode), done, busy='Changing the speakers…')
 
 
-class CountryScreen(ListScreen):
-    title = 'Wi-Fi country'
-
+class CountryScreen(ChoiceScreen):
     def __init__(self, app, current, on_changed=None):
-        super().__init__(app)
-        self.current = current
+        super().__init__(app, 'Wi-Fi country', 'Where is the Pi?', DESCRIPTIONS['country'],
+                         [(code, name, '', code) for code, name in settings.countries()], current, self._pick,
+                         initial=current or settings.guess_country())
         self.on_changed = on_changed
-        self.countries = settings.countries()
-        self.initial = current or settings.guess_country()
-        self.placed = False
-
-    def refresh(self):
-        self.list.set_items([Item(name, lambda c=code: self._pick(c), key=code,
-                                  detail='Current' if code == self.current else code,
-                                  detail_color=GOOD if code == self.current else FAINT)
-                             for code, name in self.countries])
-        if not self.placed:
-            self.placed = True
-            self._jump_to(self.initial)
-
-    def _jump_to(self, code):
-        for i, (c, _) in enumerate(self.countries):
-            if c == code:
-                self.list.index = i
-                self.list._clamp_scroll()
-
-    def _page(self, d):
-        n = len(self.list.items)
-        if n:
-            self.list.index = max(0, min(n - 1, self.list.index + d * self.list.visible_count()))
-            self.list._clamp_scroll()
-
-    def handle(self, action):
-        if action in ('left', 'lb'):
-            self._page(-1)
-        elif action in ('right', 'rb'):
-            self._page(1)
-        else:
-            super().handle(action)
 
     def hints(self):
         return [('A', 'Choose'), (('LB', 'RB'), 'Page'), ('B', 'Back')]
@@ -252,11 +217,9 @@ class CountryScreen(ListScreen):
                 app.pop()
             if self.on_changed:
                 self.on_changed()
-        app.run_task(lambda: app.settings.set('wifi-country', code), done, busy='Setting the Wi-Fi country…')
+        app.run_task(lambda: settings.change('wifi-country', code), done, busy='Setting the Wi-Fi country…')
 
-    def draw_panel(self, surf, rect):
-        y = draw_wrapped(surf, 'Where is the Pi?', (rect.x, rect.y), rect.width, 36, TEXT, bold=True) + 12
-        y = draw_wrapped(surf, DESCRIPTIONS['country'], (rect.x, y), rect.width, 29, DIM, line_gap=6) + 24
+    def draw_more(self, surf, rect, y):
         if self.current:
             draw_text(surf, 'Now: %s' % settings.country_name(self.current), (rect.x, y), 30, GOOD,
                       max_width=rect.width)
@@ -268,7 +231,7 @@ class CountryScreen(ListScreen):
 # Settings
 # ---------------------------------------------------------------------------
 def tailscale_summary(ts):
-    """(text, colour) for the Tailscale row."""
+    """(text, colour) for Tailscale's state."""
     if not ts or not ts.get('installed'):
         return 'Not installed', None
     return {
@@ -281,8 +244,8 @@ def tailscale_summary(ts):
     }.get(ts.get('state'), ('Not running', WARN))
 
 
-class SettingsScreen(ListScreen):
-    title = 'Settings'
+class SettingsListScreen(ListScreen):
+    """A list of settings, read from the helper (and Tailscale) when it opens."""
 
     def __init__(self, app):
         super().__init__(app)
@@ -295,23 +258,45 @@ class SettingsScreen(ListScreen):
         self.load()
 
     def load(self):
-        if self.loading:
-            return
-        self.loading = True
-        app = self.app
-        app.run_task(lambda: (app.settings.status(), app.settings.tailscale_status()), self._loaded)
+        if not self.loading:
+            self.loading = True
+            self.app.run_task(lambda: (settings.status(), settings.tailscale_status()), self._loaded)
 
     def _loaded(self, res, err):
         self.loading = False
-        if err:
-            self.error = str(err)
-            self.status = {}
-        else:
-            self.error = ''
-            self.status, self.ts = res
-            if self.app.quiet_boot_at_start is None:
-                self.app.quiet_boot_at_start = self.status.get('quiet_boot')
+        self.error = str(err) if err else ''
+        self.status, self.ts = res or ({}, {})
+        self.loaded()
         self.refresh()
+
+    def loaded(self):
+        """Called when the settings have been read, before refresh()."""
+
+    def switch_setting(self, name, key, on, label):
+        """Turns a setting on or off, then reads the settings again."""
+        app = self.app
+
+        def done(res, err):
+            if err:
+                app.message("Couldn't change that", str(err))
+            else:
+                self.status[key] = '1' if on else '0'
+                note = ' (after a restart)' if name == 'quiet-boot' else ''
+                app.show_toast('%s: %s%s' % (label, 'On' if on else 'Off', note), GOOD)
+            self.load()
+        app.run_task(lambda: settings.change(name, on_off(on)), done,
+                     busy='Turning on…' if on else 'Turning off…')
+
+    def toggle(self, name, key, label):
+        self.switch_setting(name, key, self.status.get(key) != '1', label)
+
+
+class SettingsScreen(SettingsListScreen):
+    title = 'Settings'
+
+    def loaded(self):
+        if not self.error and self.app.quiet_boot_at_start is None:
+            self.app.quiet_boot_at_start = self.status.get('quiet_boot')
 
     def restart_needed(self):
         st = self.status or {}
@@ -323,20 +308,18 @@ class SettingsScreen(ListScreen):
         if self.status is None:
             self.list.set_items([Item('Loading…', selectable=False, spinner=True)])
             return
+        about = Item('About this Pi', lambda: app.push(AboutScreen(app)), key='about', desc=DESCRIPTIONS['about'])
         if self.error:
-            self.list.set_items([
-                Item("Settings aren't available", selectable=False, color=WARN, desc=self.error),
-                Item('About this Pi', lambda: app.push(AboutScreen(app)), key='about', desc=DESCRIPTIONS['about']),
-            ])
+            self.list.set_items([Item("Settings aren't available", selectable=False, color=WARN, desc=self.error),
+                                 about])
             return
         st = self.status
-        speakers = settings.SPEAKER_NAMES.get(st.get('speakers'), 'Not set')
         ts_text, ts_color = tailscale_summary(self.ts)
         items = [
             Item('Speakers', lambda: app.push(SpeakersScreen(app, st.get('speakers'), self.load)), key='speakers',
-                 detail=speakers, desc=DESCRIPTIONS['speakers']),
-            Item('End stream on PC at shutdown', lambda: self._toggle('quit-on-shutdown', 'quit_on_shutdown',
-                                                                     'End stream at shutdown'),
+                 detail=settings.SPEAKER_NAMES.get(st.get('speakers'), 'Not set'), desc=DESCRIPTIONS['speakers']),
+            Item('End stream on PC at shutdown',
+                 lambda: self.toggle('quit-on-shutdown', 'quit_on_shutdown', 'End stream at shutdown'),
                  key='quit', toggle=st.get('quit_on_shutdown') == '1', desc=DESCRIPTIONS['quit']),
         ]
         if st.get('virtualhere') == '1':
@@ -345,45 +328,32 @@ class SettingsScreen(ListScreen):
         items.append(Item('Tailscale', lambda: app.push(TailscaleScreen(app)), key='tailscale', detail=ts_text,
                           detail_color=ts_color, desc=DESCRIPTIONS['tailscale']))
         if st.get('wifi') == '1':
-            items.append(Item('Wi-Fi power saving', lambda: self._toggle('wifi-powersave', 'wifi_powersave',
-                                                                        'Wi-Fi power saving'),
-                              key='powersave', toggle=st.get('wifi_powersave') == '1', desc=DESCRIPTIONS['powersave']))
             code = st.get('wifi_country', '')
-            items.append(Item('Wi-Fi country', lambda: app.push(CountryScreen(app, code, self.load)), key='country',
-                              detail=settings.country_name(code) if code else 'Not set',
-                              detail_color=None if code else WARN, desc=DESCRIPTIONS['country']))
-        items.append(Item('Hide boot messages', lambda: self._toggle('quiet-boot', 'quiet_boot', 'Hide boot messages'),
-                          key='quiet', toggle=st.get('quiet_boot') == '1',
-                          detail='Restart needed' if self.restart_needed() else '', detail_color=WARN,
-                          desc=DESCRIPTIONS['quiet']))
+            items += [
+                Item('Wi-Fi power saving', lambda: self.toggle('wifi-powersave', 'wifi_powersave',
+                                                               'Wi-Fi power saving'),
+                     key='powersave', toggle=st.get('wifi_powersave') == '1', desc=DESCRIPTIONS['powersave']),
+                Item('Wi-Fi country', lambda: app.push(CountryScreen(app, code, self.load)), key='country',
+                     detail=settings.country_name(code) if code else 'Not set', detail_color=None if code else WARN,
+                     desc=DESCRIPTIONS['country']),
+            ]
+        version = settings.setup_version()
         items += [
+            Item('Hide boot messages', lambda: self.toggle('quiet-boot', 'quiet_boot', 'Hide boot messages'),
+                 key='quiet', toggle=st.get('quiet_boot') == '1',
+                 detail='Restart needed' if self.restart_needed() else '', detail_color=WARN,
+                 desc=DESCRIPTIONS['quiet']),
             Item('Updates', lambda: app.push(UpdatesScreen(app)), key='updates',
-                 detail='Version %s' % app.settings.setup_version() if app.settings.setup_version() else '',
-                 desc=DESCRIPTIONS['updates']),
-            Item('About this Pi', lambda: app.push(AboutScreen(app)), key='about', desc=DESCRIPTIONS['about']),
+                 detail='Version %s' % version if version else '', desc=DESCRIPTIONS['updates']),
+            about,
             Item('Run Quick setup again', lambda: QuickSetup(app).start(), key='quick', desc=DESCRIPTIONS['quick']),
             Item('Uninstall this setup', lambda: app.push(UninstallScreen(app, st)), key='uninstall', color=BAD,
                  desc=DESCRIPTIONS['uninstall']),
         ]
         self.list.set_items(items)
 
-    def _toggle(self, name, key, label):
-        app = self.app
-        on = (self.status or {}).get(key) != '1'
-
-        def done(res, err):
-            if err:
-                app.message("Couldn't change that", str(err))
-            else:
-                self.status[key] = '1' if on else '0'
-                note = ' (after a restart)' if name == 'quiet-boot' else ''
-                app.show_toast('%s: %s%s' % (label, 'On' if on else 'Off', note), GOOD)
-            self.load()
-        app.run_task(lambda: app.settings.set(name, on_off(on)), done,
-                     busy='Turning on…' if on else 'Turning off…')
-
     def handle(self, action):
-        if action in ('back', 'backspace', 'escape') and self.restart_needed() and not self.app.restart_prompted:
+        if action in BACK and self.restart_needed() and not self.app.restart_prompted:
             self.app.restart_prompted = True
             self.app.choose('Restart now?', 'Hiding or showing boot messages takes effect after a restart.',
                             ['Restart now', 'Later'],
@@ -395,45 +365,19 @@ class SettingsScreen(ListScreen):
         it = self.list.selected
         if not it:
             return
-        y = draw_wrapped(surf, it.label, (rect.x, rect.y), rect.width, 36, TEXT, bold=True) + 12
-        if it.desc:
-            y = draw_wrapped(surf, it.desc, (rect.x, y), rect.width, 30, DIM, line_gap=6) + 20
+        y = describe(surf, rect, it)
         if it.key == 'tailscale' and self.ts and self.ts.get('ip'):
             draw_text(surf, 'Address: %s' % self.ts['ip'], (rect.x, y), 30, TEXT, max_width=rect.width)
         elif it.key == 'quiet' and self.restart_needed():
             draw_wrapped(surf, 'Restart the Pi to apply this change.', (rect.x, y), rect.width, 30, WARN)
 
 
-# ---------------------------------------------------------------------------
-# VirtualHere
-# ---------------------------------------------------------------------------
-class VirtualHereScreen(ListScreen):
+class VirtualHereScreen(SettingsListScreen):
     title = 'VirtualHere'
 
-    def __init__(self, app):
-        super().__init__(app)
-        self.status = None
-        self.ts = None
-        self.loading = False
-
-    def enter(self):
-        self.load()
-
-    def load(self):
-        if self.loading:
-            return
-        self.loading = True
-        app = self.app
-        app.run_task(lambda: (app.settings.status(), app.settings.tailscale_status()), self._loaded)
-
-    def _loaded(self, res, err):
-        self.loading = False
-        if err:
-            self.app.message("Couldn't read the VirtualHere settings", str(err))
-            self.status, self.ts = {}, {}
-        else:
-            self.status, self.ts = res
-        self.refresh()
+    def loaded(self):
+        if self.error:
+            self.app.message("Couldn't read the VirtualHere settings", self.error)
 
     def refresh(self):
         st = self.status
@@ -442,31 +386,17 @@ class VirtualHereScreen(ListScreen):
             return
         self.list.set_items([
             Item('Send USB to PC only while streaming',
-                 lambda: self._set('usb-handoff', 'usb_handoff', st.get('usb_handoff') != '1',
-                                   'Send USB to PC only while streaming'),
+                 lambda: self.toggle('usb-handoff', 'usb_handoff', 'Send USB to PC only while streaming'),
                  key='usb', toggle=st.get('usb_handoff') == '1', desc=DESCRIPTIONS['usb']),
             Item('Use VirtualHere over Tailscale', self._tailscale, key='tailscale',
                  toggle=st.get('vh_tailscale') == '1', desc=DESCRIPTIONS['vh_tailscale']),
         ])
 
-    def _set(self, name, key, on, label):
-        app = self.app
-
-        def done(res, err):
-            if err:
-                app.message("Couldn't change that", str(err))
-            else:
-                self.status[key] = '1' if on else '0'
-                app.show_toast('%s: %s' % (label, 'On' if on else 'Off'), GOOD)
-            self.load()
-        app.run_task(lambda: app.settings.set(name, on_off(on)), done,
-                     busy='Turning on…' if on else 'Turning off…')
-
     def _tailscale(self):
         app = self.app
-        st = self.status or {}
+        st = self.status
         if st.get('vh_tailscale') == '1':
-            self._set('virtualhere-tailscale', 'vh_tailscale', False, 'VirtualHere over Tailscale')
+            self.switch_setting('virtualhere-tailscale', 'vh_tailscale', False, 'VirtualHere over Tailscale')
         elif st.get('tailscale') != '1':
             app.message("Tailscale isn't installed", 'Install Tailscale and sign in first, in Settings > Tailscale.')
         else:
@@ -474,17 +404,17 @@ class VirtualHereScreen(ListScreen):
                         "This isn't recommended: it adds input lag and stutter, and away from home controllers work "
                         "better through Moonlight. Your PC's VirtualHere client also needs the Pi's Tailscale "
                         "address.", 'Turn on',
-                        lambda: self._set('virtualhere-tailscale', 'vh_tailscale', True, 'VirtualHere over Tailscale'))
+                        lambda: self.switch_setting('virtualhere-tailscale', 'vh_tailscale', True,
+                                                    'VirtualHere over Tailscale'))
 
     def draw_panel(self, surf, rect):
         it = self.list.selected
         if not it:
             return
-        st = self.status or {}
-        y = draw_wrapped(surf, it.label, (rect.x, rect.y), rect.width, 36, TEXT, bold=True) + 12
-        y = draw_wrapped(surf, it.desc, (rect.x, y), rect.width, 29, DIM, line_gap=6) + 20
+        st = self.status
+        y = describe(surf, rect, it, 29)
         if it.key == 'tailscale' and st.get('vh_tailscale') == '1':
-            ip = (self.ts or {}).get('ip') or "the Pi's Tailscale address"
+            ip = self.ts.get('ip') or "the Pi's Tailscale address"
             draw_wrapped(surf, 'On your PC, in the VirtualHere client: right-click USB Hubs, choose Specify Hubs, and '
                          'add %s:%s' % (ip, st.get('vh_port') or '7575'), (rect.x, y), rect.width, 29, TEXT,
                          line_gap=6)
@@ -514,8 +444,7 @@ class TailscaleScreen(ListScreen):
             return
         self.loading = True
         self.last = time.monotonic()
-        app = self.app
-        app.run_task(lambda: (app.settings.tailscale_status(), app.settings.moonlight_hosts()), self._loaded)
+        self.app.run_task(lambda: (settings.tailscale_status(), settings.moonlight_hosts()), self._loaded)
 
     def _loaded(self, res, err):
         self.loading = False
@@ -536,17 +465,16 @@ class TailscaleScreen(ListScreen):
             self.list.set_items([Item('Install Tailscale', self._install, key='install')])
             return
         state = ts.get('state')
-        items = []
         if state == 'Running':
-            items.append(Item('Turn off', self._down, key='onoff'))
+            items = [Item('Turn off', self._down, key='onoff')]
         elif state == 'Stopped':
-            items.append(Item('Turn on', self._up, key='onoff'))
+            items = [Item('Turn on', self._sign_in, key='onoff')]
         elif state in ('NeedsLogin', 'NoState'):
-            items.append(Item('Sign in', self._up, key='signin'))
+            items = [Item('Sign in', self._sign_in, key='signin')]
         elif state == 'NeedsMachineAuth':
-            items.append(Item('Waiting for approval', selectable=False))
+            items = [Item('Waiting for approval', selectable=False)]
         else:
-            items.append(Item('Tailscale is starting…', selectable=False, spinner=True))
+            items = [Item('Tailscale is starting…', selectable=False, spinner=True)]
         if state in ('Running', 'Stopped', 'NeedsMachineAuth'):
             items.append(Item('Sign out', self._logout, key='logout', color=BAD))
         self.list.set_items(items)
@@ -564,12 +492,12 @@ class TailscaleScreen(ListScreen):
         self.load()
         self.app.push(TailscaleLoginScreen(self.app))
 
-    def _up(self):
+    def _sign_in(self):
         self.app.push(TailscaleLoginScreen(self.app))
 
     def _down(self):
         app = self.app
-        app.run_task(lambda: app.settings.tailscale('down'),
+        app.run_task(lambda: settings.tailscale('down'),
                      lambda r, e: (app.message("Couldn't turn Tailscale off", str(e)) if e
                                    else app.show_toast('Tailscale is off'), self.load()),
                      busy='Turning Tailscale off…')
@@ -577,7 +505,7 @@ class TailscaleScreen(ListScreen):
     def _logout(self):
         app = self.app
         app.confirm('Sign out of Tailscale?', "You'll need to sign in again to stream away from home.", 'Sign out',
-                    lambda: app.run_task(lambda: app.settings.tailscale('logout'),
+                    lambda: app.run_task(lambda: settings.tailscale('logout'),
                                          lambda r, e: (e and app.message("Couldn't sign out", str(e)), self.load()),
                                          busy='Signing out…'), danger=True)
 
@@ -594,7 +522,7 @@ class TailscaleScreen(ListScreen):
                 draw_text(surf, value, (rect.x, y + 32), 30, TEXT, max_width=rect.width)
                 y += 84
         if running:
-            # Moonlight gets each PC's Tailscale address by itself (see moonlight_tailscale_sync).
+            # The Pi gives Moonlight each PC's Tailscale address (settings.moonlight_tailscale_sync).
             y = draw_text(surf, 'Your PC in Moonlight', (rect.x, y), 26, FAINT, bold=True).bottom + 10
             if not self.hosts:
                 y = draw_wrapped(surf, 'Pair your PC in Moonlight first.', (rect.x, y), rect.width, 28, DIM) + 14
@@ -657,7 +585,7 @@ class TailscaleLoginScreen(Screen):
                 app.call_soon(lambda: self._got_url(url))
 
         def work():
-            ok, err = app.settings.stream(['tailscale', 'up'], on_line)
+            ok, err = settings.stream(['tailscale', 'up'], on_line)
             app.call_soon(lambda: self._finished(ok, err))
         threading.Thread(target=work, daemon=True).start()
 
@@ -691,10 +619,11 @@ class TailscaleLoginScreen(Screen):
                 if self.on_done:
                     self.on_done()
             return False
+        # Signed in on the phone: Tailscale's own status may say so before `tailscale up` returns.
         if self.state in ('starting', 'url') and not self.polling and now - self.last_poll > 2:
             self.polling = True
             self.last_poll = now
-            self.app.run_task(self.app.settings.tailscale_status, self._polled)
+            self.app.run_task(settings.tailscale_status, self._polled)
         return False
 
     def _polled(self, res, err):
@@ -703,7 +632,7 @@ class TailscaleLoginScreen(Screen):
             self._success()
 
     def handle(self, action):
-        if action in ('back', 'backspace', 'escape'):
+        if action in BACK:
             # Tailscale keeps waiting for the sign-in in the background (for up to
             # 10 minutes), which does no harm.
             self.app.pop()
@@ -722,39 +651,29 @@ class TailscaleLoginScreen(Screen):
         if self.state == 'error':
             draw_text(surf, "Couldn't connect to Tailscale", (right_x, CONTENT_Y), 44, TEXT, bold=True)
             draw_wrapped(surf, self.error, (right_x, CONTENT_Y + 80), width, 32, BAD)
-            return
-        if self.state == 'done':
-            pygame.draw.circle(surf, GOOD, left.center, 120)
-            pygame.draw.lines(surf, (255, 255, 255), False, [(left.centerx - 55, left.centery),
-                                                            (left.centerx - 15, left.centery + 45),
-                                                            (left.centerx + 60, left.centery - 45)], 18)
+        elif self.state == 'done':
+            ui.tick_mark(surf, left.center)
             draw_text(surf, 'Tailscale is connected', (right_x, CONTENT_Y), 44, TEXT, bold=True)
             draw_wrapped(surf, 'You can stream from away from home now.', (right_x, CONTENT_Y + 80), width, 32)
-            return
-        if self.state == 'starting':
+        elif self.state == 'starting':
             ui.spinner(surf, left.center, 50, ACCENT, 10)
             draw_text(surf, 'Connecting to Tailscale…', (right_x, CONTENT_Y), 44, TEXT, bold=True)
             draw_wrapped(surf, 'If the Pi needs signing in, a code to scan appears here.', (right_x, CONTENT_Y + 80),
                          width, 32)
-            return
-        rrect(surf, (255, 255, 255), left, 24)
-        if self.qr:
-            surf.blit(self.qr, self.qr.get_rect(center=left.center))
-        y = CONTENT_Y
-        for num, head, body in (
-                ('1', 'Scan the code with your phone', 'Or open the link below on any phone or computer.'),
-                ('2', 'Sign in to Tailscale', 'Use the same account as on your gaming PC. If you don\'t have one, '
-                                              'you can create one for free.'),
-                ('3', 'This screen updates by itself', 'when the Pi is signed in.')):
-            pygame.draw.circle(surf, ACCENT, (right_x + 30, y + 30), 30)
-            draw_text(surf, num, (right_x + 30, y + 30), 34, (255, 255, 255), bold=True, anchor='center')
-            draw_text(surf, head, (right_x + 84, y + 8), 36, TEXT, bold=True, max_width=width - 84)
-            y = draw_wrapped(surf, body, (right_x + 84, y + 60), width - 84, 30) + 28
-        draw_wrapped(surf, self.url or '', (right_x + 84, y + 10), width - 84, 28, FAINT)
+        else:
+            rrect(surf, ui.WHITE, left, 24)
+            if self.qr:
+                surf.blit(self.qr, self.qr.get_rect(center=left.center))
+            y = ui.numbered_steps(surf, right_x, CONTENT_Y, width, [
+                ('Scan the code with your phone', 'Or open the link below on any phone or computer.'),
+                ('Sign in to Tailscale', 'Use the same account as on your gaming PC. If you don\'t have one, '
+                                         'you can create one for free.'),
+                ('This screen updates by itself', 'when the Pi is signed in.')])
+            draw_wrapped(surf, self.url or '', (right_x + 84, y + 10), width - 84, 28, FAINT)
 
 
 # ---------------------------------------------------------------------------
-# Long-running jobs (updates, installing Tailscale)
+# Long-running jobs (updates, installing Tailscale, uninstalling)
 # ---------------------------------------------------------------------------
 class ProgressScreen(Screen):
     """Runs a helper command, showing its progress. Then pops itself and calls
@@ -782,7 +701,7 @@ class ProgressScreen(Screen):
         app = self.app
 
         def work():
-            ok, err = app.settings.stream(self.args, lambda line: app.call_soon(lambda: self._line(line)))
+            ok, err = settings.stream(self.args, lambda line: app.call_soon(lambda: self._line(line)))
             app.call_soon(lambda: self._finish(ok, err))
         threading.Thread(target=work, daemon=True).start()
 
@@ -806,7 +725,7 @@ class ProgressScreen(Screen):
         self.on_done(ok, err)
 
     def handle(self, action):
-        if action in ('back', 'backspace', 'escape', 'select', 'enter'):
+        if action in BACK or action in ('select', 'enter'):
             self.app.show_toast('Please wait until this finishes')
 
     def hints(self):
@@ -828,7 +747,7 @@ class ProgressScreen(Screen):
         draw_wrapped(surf, "Don't switch the Pi off until this finishes.", (x, y), W - 2 * MARGIN, 30, WARN)
         y += 80
         box = pygame.Rect(x, y, W - 2 * MARGIN, FOOTER_Y - 50 - y)
-        rrect(surf, ui.PANEL, box, 18)
+        rrect(surf, PANEL, box, 18)
         yy = box.y + 22
         for line in self.lines:
             draw_text(surf, line, (box.x + 28, yy), 26, FAINT, max_width=box.width - 56)
@@ -858,13 +777,12 @@ class UpdatesScreen(ListScreen):
 
         def done(res, err):
             self.checking_latest = False
-            self.latest, self.latest_error = (res, False) if not err else (None, True)
+            self.latest, self.latest_error = (None, True) if err else (res, False)
             self.refresh()
-        self.app.run_task(self.app.settings.latest_version, done)
+        self.app.run_task(settings.latest_version, done)
 
     def _newer(self):
-        return self.latest and settings.version_tuple(self.latest) > settings.version_tuple(
-            self.app.settings.setup_version())
+        return self.latest and settings.version_tuple(self.latest) > settings.version_tuple(settings.setup_version())
 
     def refresh(self):
         n = self.system_updates
@@ -873,25 +791,24 @@ class UpdatesScreen(ListScreen):
         elif n == 0:
             sys_detail, sys_color = 'Up to date', GOOD
         else:
-            sys_detail, sys_color = '%d update%s' % (n, '' if n == 1 else 's'), WARN
-        current = self.app.settings.setup_version() or 'unknown'
+            sys_detail, sys_color = settings.plural(n, 'update'), WARN
+        current = settings.setup_version() or 'unknown'
         if self.checking_latest:
-            setup_item = Item('This setup', self._setup, key='setup', detail='Checking…', spinner=True)
+            detail, color = 'Checking…', None
         elif self.latest_error:
-            setup_item = Item('This setup', self._setup, key='setup', detail='Version %s' % current)
+            detail, color = 'Version %s' % current, None
         elif self._newer():
-            setup_item = Item('This setup', self._setup, key='setup', detail='%s available' % self.latest,
-                              detail_color=WARN)
+            detail, color = '%s available' % self.latest, WARN
         else:
-            setup_item = Item('This setup', self._setup, key='setup', detail='Up to date (%s)' % current,
-                              detail_color=GOOD)
-        setup_item.desc = ('This menu and the Moonlight Pi setup, from GitHub. Your settings are kept. Version '
-                           '%s is installed.' % current)
+            detail, color = 'Up to date (%s)' % current, GOOD
         self.list.set_items([
             Item('Moonlight and system', self._system, key='system', detail=sys_detail, detail_color=sys_color,
                  desc='New versions of Moonlight and of Raspberry Pi OS and its programs. Installing them '
                       'takes a few minutes.'),
-            setup_item,
+            Item('This setup', self._setup, key='setup', detail=detail, detail_color=color,
+                 spinner=self.checking_latest,
+                 desc='This menu and the Moonlight Pi setup, from GitHub. Your settings are kept. Version '
+                      '%s is installed.' % current),
         ])
 
     def _system(self):
@@ -908,11 +825,11 @@ class UpdatesScreen(ListScreen):
                 app.show_toast('Everything is up to date', GOOD)
                 return
             moonlight = 'Includes a new version of Moonlight. ' if 'moonlight-qt' in pkgs else ''
-            app.confirm('Install %d update%s?' % (n, '' if n == 1 else 's'),
+            app.confirm('Install %s?' % settings.plural(n, 'update'),
                         moonlight + "It can take several minutes. Don't switch the Pi off until it finishes.",
                         'Install', lambda: app.push(ProgressScreen(app, 'Installing updates', ['updates', 'install'],
                                                                    self._system_done)))
-        app.run_task(app.settings.check_updates, done, busy='Checking for updates…')
+        app.run_task(settings.check_updates, done, busy='Checking for updates…')
 
     def _system_done(self, ok, err):
         app = self.app
@@ -951,8 +868,7 @@ class UpdatesScreen(ListScreen):
     def draw_panel(self, surf, rect):
         it = self.list.selected
         if it:
-            y = draw_wrapped(surf, it.label, (rect.x, rect.y), rect.width, 36, TEXT, bold=True) + 12
-            draw_wrapped(surf, it.desc, (rect.x, y), rect.width, 30, DIM, line_gap=6)
+            describe(surf, rect, it)
 
 
 # ---------------------------------------------------------------------------
@@ -975,7 +891,7 @@ class AboutScreen(Screen):
         if not self.loading and time.monotonic() - self.last > 3:
             self.loading = True
             self.last = time.monotonic()
-            self.app.run_task(self.app.settings.about, self._got)
+            self.app.run_task(settings.about, self._got)
         return False
 
     def _got(self, res, err):
@@ -985,7 +901,7 @@ class AboutScreen(Screen):
         self.app.dirty = True
 
     def handle(self, action):
-        if action in ('back', 'backspace', 'escape'):
+        if action in BACK:
             self.app.pop()
 
     def hints(self):
@@ -1027,7 +943,7 @@ class AboutScreen(Screen):
 
     def draw(self, surf):
         if self.info is None:
-            ui.spinner(surf, (W // 2, ui.H // 2 - 40), 40, ACCENT, 8)
+            ui.spinner(surf, (W // 2, H // 2 - 40), 40, ACCENT, 8)
             return
         rows = self.rows()
         col_w = (W - 2 * MARGIN - 80) // 2
@@ -1072,8 +988,11 @@ class UninstallScreen(ListScreen):
         self.remove ^= {name}
         self.refresh()
 
+    def _chosen(self):
+        return [(name, label) for name, _, label, _ in REMOVE_CHOICES if name in self.remove]
+
     def _confirm(self):
-        also = [label.split()[-1] for name, _, label, _ in REMOVE_CHOICES if name in self.remove]
+        also = [label.split()[-1] for _, label in self._chosen()]
         extra = (', and uninstalls %s' % ' and '.join(also)) if also else ''
         self.app.confirm('Uninstall this setup?',
                          'This removes the TV menu, its settings and auto-start%s. The Pi then restarts the way it '
@@ -1081,7 +1000,7 @@ class UninstallScreen(ListScreen):
                          'over SSH.' % extra, 'Uninstall', self._go, danger=True, default=1)
 
     def _go(self):
-        value = ','.join(name for name, _, _, _ in REMOVE_CHOICES if name in self.remove) or 'none'
+        value = ','.join(name for name, _ in self._chosen()) or 'none'
         self.app.push(ProgressScreen(self.app, 'Uninstalling', ['uninstall', value], self._done))
 
     def _done(self, ok, err):
@@ -1139,17 +1058,14 @@ class UninstalledScreen(Screen):
         left = pygame.Rect(MARGIN, CONTENT_Y, 600, 600)
         right_x = MARGIN + 680
         width = W - MARGIN - right_x
-        pygame.draw.circle(surf, GOOD, left.center, 120)
-        pygame.draw.lines(surf, (255, 255, 255), False, [(left.centerx - 55, left.centery),
-                                                        (left.centerx - 15, left.centery + 45),
-                                                        (left.centerx + 60, left.centery - 45)], 18)
+        ui.tick_mark(surf, left.center)
         y = draw_text(surf, 'This setup has been removed', (right_x, CONTENT_Y), 44, TEXT, bold=True).bottom + 30
         n = self.seconds_left()
-        y = draw_wrapped(surf, ('The Pi restarts in %d second%s' % (n, '' if n == 1 else 's') if n
-                                else 'Restarting…') + ', the way it started before the setup: on Raspberry Pi OS '
-                         'Lite, a text login prompt.', (right_x, y), width, 32, TEXT, line_gap=8) + 24
+        when = 'The Pi restarts in %s' % settings.plural(n, 'second') if n else 'Restarting…'
+        y = draw_wrapped(surf, when + ', the way it started before the setup: on Raspberry Pi OS Lite, a text login '
+                         'prompt.', (right_x, y), width, 32, TEXT, line_gap=8) + 24
         y = draw_wrapped(surf, 'To set it up again, connect to the Pi over SSH and run the install command from '
-                         'github.com/joshmichael/moonlight-pi-setup.', (right_x, y), width, 30, DIM, line_gap=6) + 24
+                         '%s.' % REPO, (right_x, y), width, 30, DIM, line_gap=6) + 24
         if time.monotonic() - self.restart_at > 45:
             draw_wrapped(surf, "If the Pi hasn't restarted, unplug it and plug it back in.", (right_x, y), width, 30,
                          WARN)
@@ -1165,7 +1081,7 @@ class QuickSetupPage(ChoiceScreen):
         self.index = index
 
     def handle(self, action):
-        if action in ('back', 'backspace', 'escape') and self.index == 0:
+        if action in BACK and self.index == 0:
             self.app.confirm('Skip Quick setup?', 'You can go through it any time from Settings.', 'Skip',
                              self.flow.finish)
             return
@@ -1174,6 +1090,15 @@ class QuickSetupPage(ChoiceScreen):
     def draw_more(self, surf, rect, y):
         if self.index == 0 and (self.app.autopair or not self.app.controllers):
             ui.pairing_box(surf, pygame.Rect(rect.x - 16, max(y + 10, rect.bottom - 300), rect.width + 32, 300 + 16))
+
+
+# The on/off questions: page name -> (helper setting, status key).
+QUICK_SWITCHES = {
+    'quit': ('quit-on-shutdown', 'quit_on_shutdown'),
+    'quiet': ('quiet-boot', 'quiet_boot'),
+    'powersave': ('wifi-powersave', 'wifi_powersave'),
+    'usb': ('usb-handoff', 'usb_handoff'),
+}
 
 
 class QuickSetup:
@@ -1188,23 +1113,22 @@ class QuickSetup:
         self.quiet_at_start = None
 
     def start(self):
-        app = self.app
-        app.run_task(lambda: (app.settings.status(), app.settings.tailscale_status()), self._loaded,
-                     busy='Getting ready…')
+        self.app.run_task(lambda: (settings.status(), settings.tailscale_status()), self._loaded,
+                          busy='Getting ready…')
 
     def _loaded(self, res, err):
         self.status, ts = res or ({}, {})
-        self.speakers = self.status.get('speakers') if self.status.get('speakers') in settings.SPEAKER_NAMES \
-            else 'stereo'
-        self.quiet_at_start = self.status.get('quiet_boot')
+        st = self.status
+        self.speakers = st.get('speakers') if st.get('speakers') in settings.SPEAKER_NAMES else 'stereo'
+        self.quiet_at_start = st.get('quiet_boot')
         self.pages = ['welcome']
         # Raspberry Pi OS keeps Wi-Fi off until it knows the country.
-        if self.status.get('wifi') == '1' and not self.status.get('wifi_country'):
+        if st.get('wifi') == '1' and not st.get('wifi_country'):
             self.pages.append('country')
         self.pages += ['speakers', 'test', 'quit', 'quiet']
-        if self.status.get('wifi') == '1':
+        if st.get('wifi') == '1':
             self.pages.append('powersave')
-        if self.status.get('virtualhere') == '1':
+        if st.get('virtualhere') == '1':
             self.pages.append('usb')
         if ts.get('installed') and ts.get('state') in ('NeedsLogin', 'NoState'):
             self.pages.append('tailscale')
@@ -1214,9 +1138,8 @@ class QuickSetup:
     def skip(self, name):
         """Questions that turn out not to apply by the time they're reached (the
         network often isn't up yet when Quick setup starts)."""
-        st = self.app.net_status or {}
         if name == 'powersave':
-            return bool((st.get('ethernet') or {}).get('connected'))
+            return bool(((self.app.net_status or {}).get('ethernet') or {}).get('connected'))
         if name == 'tailscale':
             return not self.app.online()     # signing in needs the internet
         return False
@@ -1230,85 +1153,82 @@ class QuickSetup:
         name = self.pages[i]
         st = self.status
         step = 'Step %d of %d' % (i, len(self.pages) - 2) if 0 < i < len(self.pages) - 1 else ''
-        kw = dict(step=step, show_current=False, on_pick=lambda v: self.pick(i, v))
+
+        def page(heading, intro, options, initial=None):
+            return QuickSetupPage(self, i, heading=heading, intro=intro, options=options, initial=initial,
+                                  step=step, show_current=False, on_pick=lambda v: self.pick(i, v))
+
+        def current(key, default='1'):
+            return on_off(st.get(key, default) == '1')
+
         if name == 'welcome':
-            return QuickSetupPage(self, i, heading='Welcome to your Moonlight Pi',
-                                  intro="A few quick questions to finish setting up. It takes about a minute, and "
-                                        "you can change any of it later in Settings.",
-                                  options=[('start', 'Start', '', ''),
-                                           ('skip', 'Skip for now', 'You can go through it any time from Settings.',
-                                            '')], **kw)
+            return page('Welcome to your Moonlight Pi',
+                        "A few quick questions to finish setting up. It takes about a minute, and you can change "
+                        "any of it later in Settings.",
+                        [('start', 'Start', '', ''),
+                         ('skip', 'Skip for now', 'You can go through it any time from Settings.', '')])
         if name == 'country':
             guess = settings.guess_country()
-            return QuickSetupPage(self, i, heading='Which country is the Pi in?',
-                                  intro='Wi-Fi uses different channels in each country, so the Pi keeps its Wi-Fi '
-                                        'switched off until it knows where it is.' +
-                                        (" The country of the Pi's time zone is highlighted." if guess else ''),
-                                  options=[(code, name, '', code) for code, name in settings.countries()],
-                                  initial=guess, **kw)
+            return page('Which country is the Pi in?',
+                        'Wi-Fi uses different channels in each country, so the Pi keeps its Wi-Fi switched off '
+                        'until it knows where it is.' +
+                        (" The country of the Pi's time zone is highlighted." if guess else ''),
+                        [(code, name, '', code) for code, name in settings.countries()], guess)
         if name == 'speakers':
-            return QuickSetupPage(self, i, heading='Which speakers do you use?',
-                                  intro="This sets the sound for streaming. Moonlight's own audio setting is "
-                                        "changed to match.",
-                                  options=SPEAKER_OPTIONS, initial=self.speakers, **kw)
+            return page('Which speakers do you use?',
+                        "This sets the sound for streaming. Moonlight's own audio setting is changed to match.",
+                        SPEAKER_OPTIONS, self.speakers)
         if name == 'test':
-            return QuickSetupPage(self, i, heading='Test your speakers',
-                                  intro='Each speaker says where it is, for example "Front left". Make sure the TV '
-                                        '(and receiver, if you have one) is on.',
-                                  options=[('play', 'Play a speaker test', '', ''),
-                                           ('next', 'Continue', '', '')], **kw)
+            return page('Test your speakers',
+                        'Each speaker says where it is, for example "Front left". Make sure the TV (and receiver, '
+                        'if you have one) is on.',
+                        [('play', 'Play a speaker test', '', ''), ('next', 'Continue', '', '')])
         if name == 'quit':
-            return QuickSetupPage(self, i, heading='End the stream on your PC when the Pi shuts down?',
-                                  intro='When the Pi is switched off, for example with its power button, the stream '
-                                        'keeps running on your PC, and the PC can stay stuck on it.',
-                                  options=[('on', 'Yes, end the stream on shutdown', 'The game you\'re streaming '
-                                            'closes, so save before switching the Pi off.', 'Recommended'),
-                                           ('off', 'No, leave the stream running', 'End it on the PC yourself.', '')],
-                                  initial=on_off(st.get('quit_on_shutdown', '1') == '1'), **kw)
+            return page('End the stream on your PC when the Pi shuts down?',
+                        'When the Pi is switched off, for example with its power button, the stream keeps running '
+                        'on your PC, and the PC can stay stuck on it.',
+                        [('on', 'Yes, end the stream on shutdown', 'The game you\'re streaming closes, so save '
+                          'before switching the Pi off.', 'Recommended'),
+                         ('off', 'No, leave the stream running', 'End it on the PC yourself.', '')],
+                        current('quit_on_shutdown'))
         if name == 'quiet':
-            return QuickSetupPage(self, i, heading='Hide boot messages?',
-                                  intro='While the Pi starts, it can show a screen full of text, or nothing until '
-                                        'Moonlight appears.',
-                                  options=[('on', 'Hide boot messages', 'A cleaner start. Takes effect after a '
-                                            'restart.', 'Recommended'),
-                                           ('off', 'Show boot messages', 'Useful if something goes wrong while '
-                                            'starting.', '')],
-                                  initial=on_off(st.get('quiet_boot', '1') == '1'), **kw)
+            return page('Hide boot messages?',
+                        'While the Pi starts, it can show a screen full of text, or nothing until Moonlight '
+                        'appears.',
+                        [('on', 'Hide boot messages', 'A cleaner start. Takes effect after a restart.',
+                          'Recommended'),
+                         ('off', 'Show boot messages', 'Useful if something goes wrong while starting.', '')],
+                        current('quiet_boot'))
         if name == 'powersave':
-            return QuickSetupPage(self, i, heading='Turn off Wi-Fi power saving?',
-                                  intro='Power saving makes the Wi-Fi doze between packets, which causes stutter and '
-                                        'lag spikes when streaming.',
-                                  options=[('off', 'Turn it off', 'Smoother streaming over Wi-Fi.', 'Recommended'),
-                                           ('on', 'Leave it on', 'Uses slightly less power.', '')],
-                                  initial=on_off(st.get('wifi_powersave') == '1'), **kw)
+            return page('Turn off Wi-Fi power saving?',
+                        'Power saving makes the Wi-Fi doze between packets, which causes stutter and lag spikes '
+                        'when streaming.',
+                        [('off', 'Turn it off', 'Smoother streaming over Wi-Fi.', 'Recommended'),
+                         ('on', 'Leave it on', 'Uses slightly less power.', '')],
+                        current('wifi_powersave', '0'))
         if name == 'usb':
-            return QuickSetupPage(self, i, heading='When should VirtualHere send USB devices to your PC?',
-                                  intro='VirtualHere sends USB devices plugged into the Pi, like a wired controller, '
-                                        'to your PC as if they were plugged into it.',
-                                  options=[('on', 'Only while streaming', "Between streams they stay on the Pi, so a "
-                                            "controller works here and in Moonlight. While you're streaming, "
-                                            "they're on your PC.", 'Recommended'),
-                                           ('off', 'All the time', 'They stay on your PC, even between streams.', '')],
-                                  initial=on_off(st.get('usb_handoff', '1') == '1'), **kw)
+            return page('When should VirtualHere send USB devices to your PC?',
+                        'VirtualHere sends USB devices plugged into the Pi, like a wired controller, to your PC as '
+                        'if they were plugged into it.',
+                        [('on', 'Only while streaming', "Between streams they stay on the Pi, so a controller works "
+                          "here and in Moonlight. While you're streaming, they're on your PC.", 'Recommended'),
+                         ('off', 'All the time', 'They stay on your PC, even between streams.', '')],
+                        current('usb_handoff'))
         if name == 'tailscale':
-            return QuickSetupPage(self, i, heading='Stream away from home?',
-                                  intro='Tailscale lets you stream from your PC when you take the Pi somewhere else. '
-                                        'Sign the Pi in with your phone; it takes a minute. You can also do it later '
-                                        'in Settings > Tailscale.',
-                                  options=[('signin', 'Sign in to Tailscale', 'Scan a code with your phone and sign '
-                                            'in. Use the same account as on your gaming PC, or create a free one.', ''),
-                                           ('later', 'Not now', 'Sign in any time in Settings > Tailscale.', '')],
-                                  **kw)
-        restart = self.restart_needed()
-        options = [('finish', 'Finish', '', '')]
-        if restart:
-            options = [('restart', 'Restart now', 'Starts again with boot messages %s.' % (
-                'hidden' if self.status.get('quiet_boot') == '1' else 'showing'), ''),
-                ('finish', 'Finish', 'Restart later.', '')]
-        return QuickSetupPage(self, i, heading='All set',
-                              intro='You can change any of this in Settings, on the main menu.' +
-                                    (' The boot messages change after a restart.' if restart else ''),
-                              options=options, **kw)
+            return page('Stream away from home?',
+                        'Tailscale lets you stream from your PC when you take the Pi somewhere else. Sign the Pi in '
+                        'with your phone; it takes a minute. You can also do it later in Settings > Tailscale.',
+                        [('signin', 'Sign in to Tailscale', 'Scan a code with your phone and sign in. Use the same '
+                          'account as on your gaming PC, or create a free one.', ''),
+                         ('later', 'Not now', 'Sign in any time in Settings > Tailscale.', '')])
+        if self.restart_needed():
+            boot = 'hidden' if st.get('quiet_boot') == '1' else 'showing'
+            return page('All set', 'You can change any of this in Settings, on the main menu. The boot messages '
+                                   'change after a restart.',
+                        [('restart', 'Restart now', 'Starts again with boot messages %s.' % boot, ''),
+                         ('finish', 'Finish', 'Restart later.', '')])
+        return page('All set', 'You can change any of this in Settings, on the main menu.',
+                    [('finish', 'Finish', '', '')])
 
     def restart_needed(self):
         return self.quiet_at_start is not None and self.status.get('quiet_boot') != self.quiet_at_start
@@ -1316,6 +1236,7 @@ class QuickSetup:
     def pick(self, i, value):
         app = self.app
         name = self.pages[i]
+        st = self.status
 
         def next_page():
             self.show(i + 1)
@@ -1325,25 +1246,23 @@ class QuickSetup:
                 if err:
                     app.message("Couldn't save that", str(err))
                     return
-                if key:
-                    self.status[key] = new
+                st[key] = new
                 next_page()
             app.run_task(fn, done, busy='Saving…')
 
-        st = self.status
         if name == 'welcome':
             if value == 'start':
                 next_page()
             else:
                 self.finish()
         elif name == 'country':
-            apply(lambda: app.settings.set('wifi-country', value), 'wifi_country', value)
+            apply(lambda: settings.change('wifi-country', value), 'wifi_country', value)
         elif name == 'speakers':
             if value == st.get('speakers'):
                 next_page()
             else:
                 self.speakers = value
-                apply(lambda: app.settings.speakers(value), 'speakers', value)
+                apply(lambda: settings.set_speakers(value), 'speakers', value)
         elif name == 'test':
             if value == 'play':
                 play_speaker_test(app, self.speakers)
@@ -1355,16 +1274,13 @@ class QuickSetup:
                 app.push(TailscaleLoginScreen(app, on_done=next_page))
             else:
                 next_page()
-        elif name in ('quit', 'quiet', 'powersave', 'usb'):
-            setting, key = {'quit': ('quit-on-shutdown', 'quit_on_shutdown'),
-                            'quiet': ('quiet-boot', 'quiet_boot'),
-                            'powersave': ('wifi-powersave', 'wifi_powersave'),
-                            'usb': ('usb-handoff', 'usb_handoff')}[name]
+        elif name in QUICK_SWITCHES:
+            setting, key = QUICK_SWITCHES[name]
             new = '1' if value == 'on' else '0'
             if st.get(key) == new:
                 next_page()
             else:
-                apply(lambda: app.settings.set(setting, value), key, new)
+                apply(lambda: settings.change(setting, value), key, new)
         elif name == 'done':
             self.finish()
             if value == 'restart':
@@ -1373,7 +1289,7 @@ class QuickSetup:
     def finish(self):
         app = self.app
         try:
-            app.settings.finish_quick_setup()
+            settings.finish_quick_setup()
         except OSError:
             pass
         while isinstance(app.top, QuickSetupPage):

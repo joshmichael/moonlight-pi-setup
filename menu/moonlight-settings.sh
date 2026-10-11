@@ -140,8 +140,22 @@ write_cmdline() {
   printf '%s%s' "$1" "$ending" > "$CMDLINE_FILE"
 }
 
+# flag <command...>: 1 if the command succeeds, otherwise 0.
+flag() {
+  if "$@" > /dev/null 2>&1; then echo 1; else echo 0; fi
+}
+
+# recorded <state file> <key>: whether key=1 is in the state file.
+recorded() {
+  [[ $(kv_get "$1" "$2") == 1 ]]
+}
+
 service_enabled() {
   systemctl is-enabled --quiet "$1" 2> /dev/null
+}
+
+package_installed() {
+  [[ $(dpkg-query -W -f='${Status}' "$1" 2> /dev/null) == "install ok installed" ]]
 }
 
 virtualhere_installed() {
@@ -158,12 +172,28 @@ wifi_ifaces() {
   return 0
 }
 
+wifi_country() {
+  grep -o 'cfg80211.ieee80211_regdom=[A-Z]*' "$CMDLINE_FILE" 2> /dev/null | head -n1 | cut -d= -f2 || true
+}
+
+# installed_by_setup tailscale|virtualhere <user state file>: installed, and by
+# the setup. The setup script records that in the user's state file, and this
+# helper in its own when the menu installs Tailscale.
+installed_by_setup() {
+  local key="${1}_installed_by_script"
+  case "$1" in
+    tailscale) command -v tailscale > /dev/null || return 1 ;;
+    *) virtualhere_installed || return 1 ;;
+  esac
+  recorded "$2" "$key" || recorded "$ROOT_STATE" "$key"
+}
+
 # ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
 cmd_status() {
   if (( EUID == 0 )); then load_user; else load_self; fi
-  local speakers=none first="" country
+  local speakers=none first="" ustate="${USER_HOME}/.local/share/moonlight-pi-setup/state"
   if [[ -f $USER_HOME/.asoundrc ]]; then
     IFS= read -r first < "$USER_HOME/.asoundrc" || true
     if [[ $first == "${ASOUND_HEADER} ("* ]]; then
@@ -173,31 +203,29 @@ cmd_status() {
       speakers=custom
     fi
   fi
-  country=$(grep -o 'cfg80211.ieee80211_regdom=[A-Z]*' "$CMDLINE_FILE" 2> /dev/null | head -n1 | cut -d= -f2 || true)
   say "speakers=${speakers}"
-  say "quit_on_shutdown=$(service_enabled "$QUIT_SERVICE_NAME" && echo 1 || echo 0)"
-  say "virtualhere=$(virtualhere_installed && echo 1 || echo 0)"
-  say "usb_handoff=$(service_enabled "$HANDOFF_SERVICE_NAME" && echo 1 || echo 0)"
-  say "vh_tailscale=$([[ $(kv_get "$ROOT_STATE" vh_tailscale) == 1 ]] && echo 1 || echo 0)"
+  say "quit_on_shutdown=$(flag service_enabled "$QUIT_SERVICE_NAME")"
+  say "virtualhere=$(flag virtualhere_installed)"
+  say "usb_handoff=$(flag service_enabled "$HANDOFF_SERVICE_NAME")"
+  say "vh_tailscale=$(flag recorded "$ROOT_STATE" vh_tailscale)"
   say "vh_port=$(vh_port)"
-  say "quiet_boot=$(grep -qsF "$MARK_BEGIN" "$CONFIG_TXT" && echo 1 || echo 0)"
-  say "wifi=$(compgen -G '/sys/class/net/*/wireless' > /dev/null && echo 1 || echo 0)"
-  say "wifi_powersave=$([[ -f $NM_WIFI_CONF ]] && echo 0 || echo 1)"
-  say "wifi_country=${country}"
-  say "tailscale=$(command -v tailscale > /dev/null && echo 1 || echo 0)"
+  say "quiet_boot=$(flag grep -qsF "$MARK_BEGIN" "$CONFIG_TXT")"
+  say "wifi=$(flag compgen -G '/sys/class/net/*/wireless')"
+  say "wifi_powersave=$(flag test ! -f "$NM_WIFI_CONF")"
+  say "wifi_country=$(wifi_country)"
+  say "tailscale=$(flag command -v tailscale)"
   # What the uninstall can also remove: Moonlight, and Tailscale and VirtualHere
   # if the setup installed them.
-  local ustate="${USER_HOME}/.local/share/moonlight-pi-setup/state"
-  say "moonlight_installed=$(dpkg-query -W -f='${Status}' moonlight-qt 2> /dev/null | grep -q 'install ok installed' && echo 1 || echo 0)"
-  say "tailscale_by_setup=$(command -v tailscale > /dev/null && { [[ $(kv_get "$ustate" tailscale_installed_by_script) == 1 ]] || [[ $(kv_get "$ROOT_STATE" tailscale_installed_by_script) == 1 ]]; } && echo 1 || echo 0)"
-  say "virtualhere_by_setup=$(virtualhere_installed && [[ $(kv_get "$ustate" virtualhere_installed_by_script) == 1 ]] && echo 1 || echo 0)"
+  say "moonlight_installed=$(flag package_installed moonlight-qt)"
+  say "tailscale_by_setup=$(flag installed_by_setup tailscale "$ustate")"
+  say "virtualhere_by_setup=$(flag installed_by_setup virtualhere "$ustate")"
 }
 
 # ---------------------------------------------------------------------------
 # init
 # ---------------------------------------------------------------------------
 cmd_init() {
-  local user=${1:-} existing home ustate tokens token kept=()
+  local user=${1:-} existing
   if [[ ! $user =~ ^[a-z_][a-z0-9_-]*$ ]] || ! getent passwd "$user" > /dev/null; then
     die "No such user: ${user}"
   fi
@@ -206,22 +234,6 @@ cmd_init() {
     die "This Pi is set up for ${existing}. Uninstall moonlight-pi-setup first to set it up for another user."
   fi
   root_set user "$user"
-
-  # Older versions of the setup script kept these in the user's state file.
-  if [[ -z $(kv_get "$ROOT_STATE" migrated) ]]; then
-    home=$(getent passwd "$user" | cut -d: -f6)
-    ustate="${home}/.local/share/moonlight-pi-setup/state"
-    tokens=$(kv_get "$ustate" quiet_tokens_added)
-    for token in $tokens; do
-      if [[ " ${QUIET_TOKENS[*]} " == *" ${token} "* ]]; then
-        kept+=("$token")
-      fi
-    done
-    root_set quiet_tokens_added "${kept[*]}"
-    [[ $(kv_get "$ustate" vh_disabled_by_handoff) == 1 ]] && root_set vh_disabled_by_handoff 1
-    [[ $(kv_get "$ustate" tailscale_installed_by_script) == 1 ]] && root_set tailscale_installed_by_script 1
-    root_set migrated 1
-  fi
   say "Settings helper set up for ${user}"
 }
 
@@ -851,13 +863,7 @@ cmd_uninstall() {
       *) die "Use: uninstall none, or any of moonlight,tailscale,virtualhere" ;;
     esac
   done
-  if [[ ! -f $script ]]; then
-    # Set up before that copy was kept: use the latest version from GitHub.
-    say "Downloading the setup script…"
-    script=$(mktemp /tmp/moonlight-pi-setup-uninstall.XXXXXX)
-    curl -fsSL "$RAW_SCRIPT_URL" -o "$script" || die "Couldn't download the setup script. Is the Pi connected to the internet?"
-    bash -n "$script" || die "The downloaded setup script looks damaged. Try again later."
-  fi
+  [[ -f $script ]] || die "The setup script isn't installed (${script})."
   cd /
   env -i PATH="$PATH" HOME="$USER_HOME" LANG=C.UTF-8 TERM=dumb MOONLIGHT_PI_USER="$USER_NAME" \
     bash "$script" --uninstall --unattended "${args[@]}" || die "The uninstall didn't finish."

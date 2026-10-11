@@ -344,10 +344,8 @@ def main():
     finally:
         if portal:
             portal.close()
-        if hotspot and not connected:
+        if hotspot:
             hotspot.remove()
-        elif hotspot:
-            run(['nmcli', 'connection', 'delete', 'id', HOTSPOT_NAME])
         try:
             os.remove(DNSMASQ_CONF)
         except OSError:

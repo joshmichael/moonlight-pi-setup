@@ -3,6 +3,7 @@
 Uses nmcli for most things. New Wi-Fi profiles are added over D-Bus, so the
 password never appears on a command line (where other programs could see it).
 """
+import json
 import logging
 import subprocess
 import time
@@ -114,12 +115,6 @@ class Network:
             log.warning('nmcli: %s', e)
 
     # -- status -------------------------------------------------------------
-    def state(self):
-        try:
-            return nmcli_rows(['-f', 'STATE', 'general'])[0][0]
-        except (NetworkError, IndexError):
-            return 'unknown'
-
     def online(self):
         """True when Ethernet or Wi-Fi is connected (internet not required, LAN is
         enough). NetworkManager's overall state isn't used, because virtual
@@ -139,7 +134,6 @@ class Network:
 
     def tailscale_ip(self):
         """The Pi's Tailscale address while Tailscale is up and online, else ''."""
-        import json
         rc, out, _ = run(['tailscale', 'status', '--json'], 5)
         if rc != 0:
             return ''
@@ -162,23 +156,22 @@ class Network:
         return out.strip().split(' | ')[0].split('/')[0]
 
     def status(self):
-        st = {'state': self.state(), 'ethernet': None, 'wifi': None, 'tailscale': '', 'hotspot': False,
-              'online': False, 'internet': 'unknown'}
+        st = {'ethernet': None, 'wifi': None, 'tailscale': '', 'hotspot': False, 'online': False,
+              'internet': 'unknown'}
         try:
             devices = nmcli_rows(['-f', 'DEVICE,TYPE,STATE,CONNECTION', 'device'])
         except NetworkError:
             devices = []
+        wifi_conn = ''
         for dev, typ, state, conn in devices:
+            connected = state == 'connected'
             if typ == 'ethernet' and st['ethernet'] is None:
-                connected = state == 'connected'
-                st['ethernet'] = {'device': dev, 'connected': connected,
-                                  'ip': self._ip(dev) if connected else ''}
+                st['ethernet'] = {'connected': connected, 'ip': self._ip(dev) if connected else ''}
             elif typ == 'wifi' and dev == self.wifi_dev:
-                connected = state == 'connected'
-                st['wifi'] = {'device': dev, 'state': state, 'connected': connected and conn != HOTSPOT_NAME,
-                              'connection': conn, 'ip': self._ip(dev) if connected else '',
-                              'ssid': '', 'signal': 0, 'enabled': self.wifi_enabled()}
+                wifi_conn = conn
                 st['hotspot'] = conn == HOTSPOT_NAME
+                st['wifi'] = {'connected': connected and not st['hotspot'], 'ip': self._ip(dev) if connected else '',
+                              'ssid': '', 'signal': 0, 'enabled': self.wifi_enabled()}
         w = st['wifi']
         if w and w['connected']:
             try:
@@ -189,8 +182,7 @@ class Network:
                         break
             except (NetworkError, ValueError):
                 pass
-            if not w['ssid']:
-                w['ssid'] = w['connection']
+            w['ssid'] = w['ssid'] or wifi_conn
         st['online'] = bool((st['ethernet'] and st['ethernet']['connected']) or (w and w['connected']))
         if st['online']:
             st['internet'] = self.connectivity()
