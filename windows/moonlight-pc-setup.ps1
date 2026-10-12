@@ -15,7 +15,7 @@
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$PcSetupVersion = '1.0.1'
+$PcSetupVersion = '1.0.2'
 $IssuesUrl = 'https://github.com/joshmichael/moonlight-pi-setup/issues'
 
 $VhDownloadUrl = 'https://www.virtualhere.com/sites/default/files/usbclient/vhui64.exe'
@@ -52,22 +52,27 @@ function Read-YesNo([string]$Question, [bool]$Default) {
 # VirtualHere client
 # ---------------------------------------------------------------------------
 
-# Paths of vhui64.exe that Windows starts at login (Startup folder shortcuts
-# and the Run key).
-function Get-VhStartupTargets {
-    $targets = @()
+# Startup folder shortcuts that start vhui64.exe, as objects with Path (the
+# shortcut) and Target (the vhui64.exe it starts).
+function Get-VhStartupShortcuts {
     $shell = New-Object -ComObject WScript.Shell
     foreach ($lnk in Get-ChildItem -Path $StartupDir -Filter '*.lnk' -ErrorAction SilentlyContinue) {
         $target = $shell.CreateShortcut($lnk.FullName).TargetPath
-        if ($target -like '*\vhui64.exe') { $targets += $target }
+        if ($target -like '*\vhui64.exe') { [pscustomobject]@{ Path = $lnk.FullName; Target = $target } }
     }
+}
+
+# Paths of vhui64.exe that Windows starts at login (Startup folder shortcuts
+# and the Run key). Leaves out any whose file no longer exists.
+function Get-VhStartupTargets {
+    $targets = @(Get-VhStartupShortcuts | ForEach-Object { $_.Target })
     $run = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue
     if ($run) {
         foreach ($p in $run.PSObject.Properties) {
             if ("$($p.Value)" -match '"?([^"]*\\vhui64\.exe)') { $targets += $Matches[1] }
         }
     }
-    return $targets
+    return @($targets | Where-Object { Test-Path -LiteralPath $_ })
 }
 
 # The VirtualHere client the user already has, if any: the one running now,
@@ -179,6 +184,14 @@ function Set-VhRefreshPeriod([string]$Exe) {
 }
 
 function Set-VhStartup([string]$Exe) {
+    # A shortcut to a VirtualHere client that has since been deleted or moved
+    # would start nothing, so replace it.
+    foreach ($s in Get-VhStartupShortcuts) {
+        if (-not (Test-Path -LiteralPath $s.Target)) {
+            Remove-Item -LiteralPath $s.Path -Force
+            Write-Info "Removed a startup shortcut to a VirtualHere client that no longer exists: $($s.Target)"
+        }
+    }
     $existing = @(Get-VhStartupTargets)
     if ($existing.Count -gt 0) {
         Write-Ok 'VirtualHere already starts with Windows'
