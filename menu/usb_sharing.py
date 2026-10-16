@@ -460,6 +460,7 @@ class LogWatcher:
             with open(self.path, 'rb') as f:
                 text = f.read(st.st_size).decode('utf-8', 'replace')
         except OSError:
+            self.inode, self.pos = -1, 0     # no log yet: read it from the start once it appears
             return False, None
         self.inode, self.pos = st.st_ino, st.st_size
         for line in text.splitlines():
