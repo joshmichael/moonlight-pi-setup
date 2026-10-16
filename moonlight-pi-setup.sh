@@ -1057,6 +1057,12 @@ do_uninstall() {
   # USB sharing's Linux side (part of the setup, so it's always removed)
   if [[ $(state_get usbip_installed_by_script) == 1 ]] && package_installed usbip; then
     sudo apt-get remove -y usbip || warn "Could not remove the usbip package."
+    # usb.ids (the USB device names) came with it: remove it too, unless it was
+    # chosen by hand or something else installed needs it.
+    if package_installed usb.ids && [[ $(apt-mark showauto usb.ids) == usb.ids ]] \
+       && ! apt-cache rdepends --installed usb.ids 2>/dev/null | tail -n +3 | grep -q .; then
+      sudo apt-get remove -y usb.ids > /dev/null || true
+    fi
   fi
 
   # Optional software
