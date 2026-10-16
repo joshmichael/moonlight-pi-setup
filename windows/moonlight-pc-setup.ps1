@@ -1,33 +1,58 @@
 # moonlight-pc-setup.ps1
 #
 # Sets up the gaming PC to go with moonlight-pi-setup:
-#   - VirtualHere client: uses the one already installed, or downloads the
-#     official one; makes it start with Windows; and makes it look for the Pi
-#     every 5 seconds, so USB devices reach the PC within seconds of a stream
-#     starting.
+#   - USB sharing (optional): USB devices plugged into the Pi, like a wired
+#     controller, come to this PC while you stream, as if they were plugged in
+#     here. Installs usbip-win2 (the Windows side of USB/IP), finds the Pi, and
+#     installs a small helper that starts hidden when you log in.
 #   - Tailscale (optional), to stream when you're away from home.
 #
 # Run it in PowerShell on the gaming PC as your normal user (not as admin):
 #   irm https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/windows/moonlight-pc-setup.ps1 | iex
 #
-# Safe to run again: it only changes what isn't set up yet.
+# Safe to run again: it checks and repairs what's set up, and can remove USB
+# sharing from this PC.
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'      # Windows PowerShell downloads slowly while showing progress
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$PcSetupVersion = '1.0.2'
+$PcSetupVersion = '2.0.0'
 $IssuesUrl = 'https://github.com/joshmichael/moonlight-pi-setup/issues'
+$RawUrl = 'https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main'
 
-$VhDownloadUrl = 'https://www.virtualhere.com/sites/default/files/usbclient/vhui64.exe'
-$VhSigner = 'VirtualHere Pty. Ltd.'
-$VhInstallDir = Join-Path $env:LOCALAPPDATA 'Programs\VirtualHere'
-$VhIni = Join-Path $env:APPDATA 'vhui.ini'
-$VhRefreshSeconds = 5
-$StartupDir = [Environment]::GetFolderPath('Startup')
-$StartupLink = Join-Path $StartupDir 'VirtualHere Client.lnk'
+# usbip-win2 (https://github.com/vadimgrn/usbip-win2): a tested version, checked
+# against its SHA-256 before it's run. Newer versions are only used once tested.
+$UsbipVersion = '0.9.8.1'
+$UsbipInstallers = @{
+    'x64'   = @{ Url = 'https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-x64.exe'
+                 Sha256 = '38CAD6D4432B52D5BB9409D9AD03B72FDFFC4ADA4CD3A48FBECA1A2752A8518A' }
+    'arm64' = @{ Url = 'https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-arm64.exe'
+                 Sha256 = 'CAB7FF97F79275EEB5C5B8BB2EB3111FF6B6C4EEAD07D9BEC9BE5BD1E3A35800' }
+}
+$UsbipSigner = 'Cloudyne Systems (Scheibling Consulting AB)'
+$UsbipDir = Join-Path $env:ProgramFiles 'USBip'
+$UsbipExe = Join-Path $UsbipDir 'usbip.exe'
+$UsbipPort = 3240
+
+$AppDir = Join-Path $env:LOCALAPPDATA 'Programs\moonlight-pi-setup'
+$HelperName = 'moonlight-usb-helper.ps1'
+$HelperPath = Join-Path $AppDir $HelperName
+$ConfigPath = Join-Path $AppDir 'usb-sharing.json'
+$HelperLog = Join-Path $AppDir 'usb-helper.log'
+$InstalledMarker = Join-Path $AppDir 'installed-usbip-win2'    # this setup installed usbip-win2
+$StartupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Moonlight Pi USB sharing.lnk'
+$Conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+$PowerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
 $TailscaleInstallerUrl = 'https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe'
 $TailscaleSigner = 'Tailscale Inc.'
+$TailscaleExe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+
+# Raspberry Pi network cards start with these (to name a Pi found by its address).
+$RaspberryPiMacPrefixes = @('28-CD-C1', '2C-CF-67', '88-A2-9E', 'B8-27-EB', 'D8-3A-DD', 'DC-A6-32', 'E4-5F-01')
+
+$script:RestartNeeded = $false
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -48,187 +73,484 @@ function Read-YesNo([string]$Question, [bool]$Default) {
     }
 }
 
-# ---------------------------------------------------------------------------
-# VirtualHere client
-# ---------------------------------------------------------------------------
-
-# Startup folder shortcuts that start vhui64.exe, as objects with Path (the
-# shortcut) and Target (the vhui64.exe it starts).
-function Get-VhStartupShortcuts {
-    $shell = New-Object -ComObject WScript.Shell
-    foreach ($lnk in Get-ChildItem -Path $StartupDir -Filter '*.lnk' -ErrorAction SilentlyContinue) {
-        $target = $shell.CreateShortcut($lnk.FullName).TargetPath
-        if ($target -like '*\vhui64.exe') { [pscustomobject]@{ Path = $lnk.FullName; Target = $target } }
-    }
-}
-
-# Paths of vhui64.exe that Windows starts at login (Startup folder shortcuts
-# and the Run key). Leaves out any whose file no longer exists.
-function Get-VhStartupTargets {
-    $targets = @(Get-VhStartupShortcuts | ForEach-Object { $_.Target })
-    $run = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue
-    if ($run) {
-        foreach ($p in $run.PSObject.Properties) {
-            if ("$($p.Value)" -match '"?([^"]*\\vhui64\.exe)') { $targets += $Matches[1] }
-        }
-    }
-    return @($targets | Where-Object { Test-Path -LiteralPath $_ })
-}
-
-# The VirtualHere client the user already has, if any: the one running now,
-# then the one Windows starts at login, then the usual install places.
-function Find-VhClient {
-    $candidates = @()
-    $candidates += Get-CimInstance Win32_Process -Filter "Name='vhui64.exe'" |
-        Where-Object { $_.ExecutablePath } | ForEach-Object { $_.ExecutablePath }
-    $candidates += Get-VhStartupTargets
-    $candidates += 'C:\Program Files\VirtualHere Client\vhui64.exe'
-    $candidates += Join-Path $VhInstallDir 'vhui64.exe'
-    foreach ($c in $candidates) {
-        if ($c -and (Test-Path -LiteralPath $c)) { return (Resolve-Path -LiteralPath $c).Path }
-    }
-    return $null
-}
-
 function Test-Signature([string]$Path, [string]$Signer) {
     $sig = Get-AuthenticodeSignature -LiteralPath $Path
     return ($sig.Status -eq 'Valid' -and $sig.SignerCertificate.Subject -like "CN=$Signer,*")
 }
 
-function Install-VhClient {
-    Write-Info "Downloading the VirtualHere client from $VhDownloadUrl"
-    New-Item -ItemType Directory -Force -Path $VhInstallDir | Out-Null
-    $tmp = Join-Path $VhInstallDir 'vhui64.exe.download'
-    Invoke-WebRequest -Uri $VhDownloadUrl -OutFile $tmp -UseBasicParsing
-    if (-not (Test-Signature $tmp $VhSigner)) {
-        Remove-Item -LiteralPath $tmp -Force
-        throw "The downloaded file isn't signed by $VhSigner, so it wasn't installed."
-    }
-    $exe = Join-Path $VhInstallDir 'vhui64.exe'
-    Move-Item -LiteralPath $tmp -Destination $exe -Force
-    Write-Ok "Installed the VirtualHere client to $exe"
-    return $exe
-}
-
-function Get-VhClientProcess([string]$Exe) {
-    Get-CimInstance Win32_Process -Filter "Name='vhui64.exe'" |
-        Where-Object { $_.ExecutablePath -eq $Exe -and $_.CommandLine -notmatch '\s-t\s' }
-}
-
-function Start-VhClient([string]$Exe) {
-    Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe) -WindowStyle Minimized
-}
-
-# Close the client so its settings file can be edited (it rewrites the file
-# when it exits). Asks the user to close it if it doesn't go by itself, for
-# example because it's asking whether to stop using a device.
-function Stop-VhClient([string]$Exe) {
-    if (-not (Get-VhClientProcess $Exe)) { return }
-    $sender = Start-Process -FilePath $Exe -ArgumentList '-t', 'EXIT' -PassThru -WindowStyle Hidden
-    for ($i = 0; $i -lt 20 -and (Get-VhClientProcess $Exe); $i++) { Start-Sleep -Milliseconds 500 }
-    if (-not $sender.HasExited) { $sender | Stop-Process -Force -ErrorAction SilentlyContinue }
-    while (Get-VhClientProcess $Exe) {
-        Write-Warn 'VirtualHere is still open (it may be asking about a device that is in use).'
-        Read-Host '    Close VirtualHere (right-click its tray icon > Exit), then press Enter' | Out-Null
+# Runs usbip.exe: (exit code, what it printed). (Windows PowerShell turns a
+# program's error output into errors, which would stop this script.)
+function Invoke-Usbip([string[]]$Arguments) {
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = (& $UsbipExe @Arguments 2>&1 | ForEach-Object { "$_" }) -join "`n"
+        return $LASTEXITCODE, $out
+    } finally {
+        $ErrorActionPreference = $old
     }
 }
 
-# Returns the ini text with AutoRefreshLookupPeriod set, keeping the rest of
-# the file (and its Windows line endings) as it was.
-function Set-IniRefreshPeriod([string]$Text, [int]$Seconds) {
-    $line = "AutoRefreshLookupPeriod=$Seconds"
-    $lines = @()
-    if ($Text) { $lines = @($Text -split "\r?\n") }
-    if ($lines.Count -gt 0 -and $lines[-1] -eq '') { $lines = $lines[0..($lines.Count - 2)] }
-    $found = $false
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^AutoRefreshLookupPeriod=') { $lines[$i] = $line; $found = $true }
-    }
-    if (-not $found) {
-        $general = [array]::IndexOf($lines, '[General]')
-        if ($general -ge 0) {
-            $before = $lines[0..$general]
-            $after = if ($general + 1 -lt $lines.Count) { $lines[($general + 1)..($lines.Count - 1)] } else { @() }
-            $lines = @($before) + $line + @($after)
-        } else {
-            $lines += '[General]', $line
-        }
-    }
-    return (($lines -join "`r`n") + "`r`n")
-}
-
-function Get-IniRefreshPeriod {
-    if (-not (Test-Path -LiteralPath $VhIni)) { return $null }
-    $m = Select-String -LiteralPath $VhIni -Pattern '^AutoRefreshLookupPeriod=(\d+)' | Select-Object -First 1
-    if ($m) { return [int]$m.Matches[0].Groups[1].Value }
+# ---------------------------------------------------------------------------
+# usbip-win2
+# ---------------------------------------------------------------------------
+function Get-UsbipInstalledVersion {
+    $keys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    $app = Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'USBip *' } |
+        Select-Object -First 1
+    if ($app) { return "$($app.DisplayVersion)" }
     return $null
 }
 
-function Set-VhRefreshPeriod([string]$Exe) {
-    $current = Get-IniRefreshPeriod
-    if ($current -eq $VhRefreshSeconds) {
-        Write-Ok "VirtualHere already looks for the Pi every $VhRefreshSeconds seconds"
-        return
+function Get-WindowsArchitecture {
+    $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    switch ($arch) {
+        'AMD64' { return 'x64' }
+        'ARM64' { return 'arm64' }
+        default { throw "USB sharing needs 64-bit Windows (this PC is $arch)." }
     }
-    $wasRunning = [bool](Get-VhClientProcess $Exe)
-    Stop-VhClient $Exe
-    $text = ''
-    if (Test-Path -LiteralPath $VhIni) {
-        Copy-Item -LiteralPath $VhIni -Destination "$VhIni.bak" -Force
-        $text = [IO.File]::ReadAllText($VhIni)
-    }
-    [IO.File]::WriteAllText($VhIni, (Set-IniRefreshPeriod $text $VhRefreshSeconds), [Text.Encoding]::ASCII)
-    $was = if ($current) { "$current" } else { '30 (the default)' }
-    Write-Ok "VirtualHere will look for the Pi every $VhRefreshSeconds seconds (was $was)"
-    if ($wasRunning) { Start-VhClient $Exe }
 }
 
-function Set-VhStartup([string]$Exe) {
-    # A shortcut to a VirtualHere client that has since been deleted or moved
-    # would start nothing, so replace it.
-    foreach ($s in Get-VhStartupShortcuts) {
-        if (-not (Test-Path -LiteralPath $s.Target)) {
-            Remove-Item -LiteralPath $s.Path -Force
-            Write-Info "Removed a startup shortcut to a VirtualHere client that no longer exists: $($s.Target)"
+function Test-WindowsVersion {
+    $build = [Environment]::OSVersion.Version.Build
+    if ($build -lt 18362) {
+        throw "USB sharing needs Windows 10 version 1903 or later, or Windows 11 (this PC is build $build)."
+    }
+}
+
+# Whether version $A is at least $B (False if either isn't a version number).
+function Test-VersionAtLeast([string]$A, [string]$B) {
+    try { return [version]$A -ge [version]$B } catch { return $false }
+}
+
+# Other programs can install usbip-win2 too (Vibepollo uses it for its DualSense
+# emulation), so one that's already there is only ever updated, never replaced
+# by an older version, and only with your OK.
+function Install-Usbip {
+    $current = Get-UsbipInstalledVersion
+    if ($current -and (Test-Path -LiteralPath $UsbipExe)) {
+        if (Test-VersionAtLeast $current $UsbipVersion) {
+            Write-Ok "usbip-win2 $current is installed"
+            return
+        }
+        Write-Info "usbip-win2 $current is installed. USB sharing is tested with $UsbipVersion."
+        if (-not (Read-YesNo "Update usbip-win2 to $UsbipVersion?" $true)) {
+            throw "USB sharing needs usbip-win2 $UsbipVersion or newer."
         }
     }
-    $existing = @(Get-VhStartupTargets)
-    if ($existing.Count -gt 0) {
-        Write-Ok 'VirtualHere already starts with Windows'
-        if ($existing -notcontains $Exe) {
-            Write-Info "(using $($existing[0]))"
-        }
+    $arch = Get-WindowsArchitecture
+    $pkg = $UsbipInstallers[$arch]
+    Write-Info "Downloading usbip-win2 $UsbipVersion ($arch) from GitHub..."
+    $tmp = Join-Path $env:TEMP "USBip-$UsbipVersion-$arch.exe"
+    Invoke-WebRequest -Uri $pkg.Url -OutFile $tmp -UseBasicParsing
+    $hash = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash
+    if ($hash -ne $pkg.Sha256 -or -not (Test-Signature $tmp $UsbipSigner)) {
+        Remove-Item -LiteralPath $tmp -Force
+        throw "The downloaded usbip-win2 installer isn't the expected file, so it wasn't run."
+    }
+    Write-Ok 'Download checked (SHA-256 and signature)'
+    Write-Info 'While it installs, USB devices on this PC (your keyboard and mouse too) stop for a'
+    Write-Info 'moment. Windows asks for permission to install it.'
+    Read-Host '    Press Enter to install usbip-win2' | Out-Null
+    $log = Join-Path $env:TEMP "USBip-$UsbipVersion-install.log"
+    try {
+        $p = Start-Process -FilePath $tmp -ArgumentList '/SILENT', '/NORESTART', "/LOG=`"$log`"" -Verb RunAs -Wait -PassThru
+    } catch {
+        throw "usbip-win2 wasn't installed (Windows didn't get permission to install it)."
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+    if ($p.ExitCode -ne 0 -or (Get-UsbipInstalledVersion) -ne $UsbipVersion) {
+        throw "usbip-win2 didn't install (exit code $($p.ExitCode)). Its log is at $log"
+    }
+    New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+    Set-Content -LiteralPath $InstalledMarker -Value 'usbip-win2 was installed by the moonlight-pi-setup PC setup.'
+    $script:RestartNeeded = $true
+    Write-Ok "Installed usbip-win2 $UsbipVersion"
+}
+
+# Programs other than this setup that use usbip-win2 (their folders), such as
+# Vibepollo, which bundles its drivers.
+function Get-OtherUsbipUsers {
+    @(Get-ChildItem -Path "$env:ProgramFiles\*\drivers\usbip-win2" -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $root = $_.Parent.Parent
+            $product = Get-ChildItem -LiteralPath $root.FullName -Filter *.exe -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.VersionInfo.ProductName } | Where-Object { $_ } | Select-Object -First 1
+            if ($product) { $product } else { $root.Name }
+        })
+}
+
+function Uninstall-Usbip {
+    $uninstaller = Join-Path $UsbipDir 'unins000.exe'
+    if (-not (Test-Path -LiteralPath $uninstaller)) { return }
+    Write-Info 'Uninstalling usbip-win2 (Windows asks for permission)...'
+    try {
+        $p = Start-Process -FilePath $uninstaller -ArgumentList '/SILENT', '/NORESTART' -Verb RunAs -Wait -PassThru
+    } catch {
+        Write-Warn "usbip-win2 wasn't uninstalled (Windows didn't get permission). Remove it in Settings > Apps."
         return
     }
+    # The uninstaller hands over to a copy of itself and returns straight away.
+    for ($i = 0; $i -lt 120 -and (Get-UsbipInstalledVersion); $i++) { Start-Sleep -Seconds 1 }
+    if (Get-UsbipInstalledVersion) {
+        Write-Warn "usbip-win2 is still installed (exit code $($p.ExitCode)). Remove it in Settings > Apps."
+    } else {
+        $script:RestartNeeded = $true
+        Write-Ok 'Uninstalled usbip-win2'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Finding the Pi
+# ---------------------------------------------------------------------------
+function Test-UsbipPort([string]$Address, [int]$TimeoutMs = 800) {
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        return ($client.ConnectAsync($Address, $UsbipPort).Wait($TimeoutMs) -and $client.Connected)
+    } catch {
+        return $false
+    } finally {
+        $client.Close()
+    }
+}
+
+# Whether a USB/IP server answers at this address (the Pi's USB sharing).
+# Between streams it shares nothing, and usbip.exe then prints nothing at all.
+function Test-UsbipServer([string]$Address) {
+    if (-not (Test-UsbipPort $Address)) { return $false }
+    $rc, $out = Invoke-Usbip @('list', '-r', $Address)
+    return ($rc -eq 0)
+}
+
+# The home network's addresses to look through: the networks this PC reaches
+# the internet through (so not virtual networks like VMware's, VirtualBox's or
+# WSL's, nor Tailscale). At most the 254 addresses around this PC's own one.
+function Get-LocalSubnets {
+    Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' -and
+                       $_.InterfaceAlias -notmatch 'Tailscale' } |
+        ForEach-Object { $_.IPv4Address } | Where-Object { $_.IPAddress -notlike '169.254.*' } |
+        ForEach-Object { ($_.IPAddress -split '\.')[0..2] -join '.' } | Sort-Object -Unique
+}
+
+# Reads a name from a DNS message: its labels, following compression pointers.
+function Read-DnsName([byte[]]$Data, [int]$Index) {
+    $labels = @()
+    for ($guard = 0; $guard -lt 64 -and $Index -lt $Data.Length; $guard++) {
+        $len = $Data[$Index]
+        if ($len -eq 0) { break }
+        if ($len -ge 192) { $Index = (($len -band 63) * 256) + $Data[$Index + 1]; continue }
+        $labels += [Text.Encoding]::ASCII.GetString($Data, $Index + 1, $len)
+        $Index += $len + 1
+    }
+    return , $labels
+}
+
+function Skip-DnsName([byte[]]$Data, [int]$Index) {
+    while ($Index -lt $Data.Length -and $Data[$Index] -ne 0) {
+        if ($Data[$Index] -ge 192) { return $Index + 2 }
+        $Index += $Data[$Index] + 1
+    }
+    return $Index + 1
+}
+
+# The Pi's own name (like moonlight-pi), asked from the Pi itself: Raspberry Pi
+# OS answers name questions sent straight to it (mDNS), when routers often
+# don't know the name.
+function Get-MdnsName([string]$Address) {
+    $parts = $Address.Split('.')
+    if ($parts.Count -ne 4) { return $null }
+    [array]::Reverse($parts)
+    $query = New-Object System.Collections.Generic.List[byte]
+    $query.AddRange([byte[]](0x4d, 0x50, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+    foreach ($label in @($parts) + 'in-addr', 'arpa') {
+        $query.Add([byte]$label.Length)
+        $query.AddRange([Text.Encoding]::ASCII.GetBytes($label))
+    }
+    $query.AddRange([byte[]](0, 0, 12, 0, 1))         # PTR record, internet class
+    $udp = New-Object System.Net.Sockets.UdpClient
+    try {
+        $udp.Client.ReceiveTimeout = 1000
+        [void]$udp.Send($query.ToArray(), $query.Count, $Address, 5353)
+        $from = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+        $r = $udp.Receive([ref]$from)
+        $questions = $r[4] * 256 + $r[5]
+        if ($r[6] * 256 + $r[7] -lt 1) { return $null }
+        $i = 12
+        for ($q = 0; $q -lt $questions; $q++) { $i = (Skip-DnsName $r $i) + 4 }
+        $i = Skip-DnsName $r $i
+        if ($r[$i] * 256 + $r[$i + 1] -ne 12) { return $null }
+        $labels = Read-DnsName $r ($i + 10)
+        if ($labels.Count -gt 0) { return $labels[0] }
+    } catch {
+    } finally {
+        $udp.Close()
+    }
+    return $null
+}
+
+function Get-PiName([string]$Address, [string]$Mac) {
+    $name = Get-MdnsName $Address
+    if ($name) { return $name }
+    try {
+        $task = [System.Net.Dns]::GetHostEntryAsync($Address)
+        if ($task.Wait(1500) -and $task.Result.HostName -and $task.Result.HostName -ne $Address) {
+            return ($task.Result.HostName -split '\.')[0]
+        }
+    } catch {}
+    if ($Mac -and $RaspberryPiMacPrefixes -contains $Mac.Substring(0, 8).ToUpper()) { return 'Raspberry Pi' }
+    return 'USB/IP server'
+}
+
+function Get-Mac([string]$Address) {
+    $n = Get-NetNeighbor -IPAddress $Address -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($n -and $n.LinkLayerAddress -and $n.LinkLayerAddress -ne '00-00-00-00-00-00') { return $n.LinkLayerAddress }
+    return $null
+}
+
+# Every USB/IP server on the home network, as objects with name, address and mac.
+function Find-Pis {
+    $found = @()
+    foreach ($base in Get-LocalSubnets) {
+        Write-Info "Looking for your Pi on $base.0/24..."
+        $clients = foreach ($i in 1..254) {
+            $c = New-Object System.Net.Sockets.TcpClient
+            [pscustomobject]@{ Ip = "$base.$i"; Client = $c; Task = $c.ConnectAsync("$base.$i", $UsbipPort) }
+        }
+        try { [System.Threading.Tasks.Task]::WaitAll(@($clients.Task), 2000) | Out-Null } catch {}
+        $open = @($clients | Where-Object { $_.Task.Status -eq 'RanToCompletion' } | ForEach-Object { $_.Ip })
+        $clients | ForEach-Object { $_.Client.Close() }
+        foreach ($ip in $open) {
+            if (Test-UsbipServer $ip) {
+                $mac = Get-Mac $ip
+                $found += [pscustomobject]@{ name = (Get-PiName $ip $mac); address = $ip; mac = $mac }
+            }
+        }
+    }
+    return $found
+}
+
+# The Pi's Tailscale address, if Tailscale on this PC knows it (for USB sharing
+# over Tailscale, which is off unless it's turned on on the TV).
+function Find-TailscaleAddress($Pi) {
+    if (-not (Test-Path -LiteralPath $TailscaleExe)) { return $null }
+    try {
+        $status = & $TailscaleExe status --json 2>$null | Out-String | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+    $short = ("$($Pi.name)" -split '\.')[0].ToLower()
+    foreach ($p in $status.Peer.PSObject.Properties.Value) {
+        $endpoints = @($p.Addrs) + @($p.CurAddr) | Where-Object { $_ }
+        $match = ($endpoints | Where-Object { $_ -like "$($Pi.address):*" }) -or
+            ($short -and "$($p.HostName)".ToLower() -eq $short)
+        if ($match) {
+            $ip = @($p.TailscaleIPs) | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
+            if ($ip) { return $ip }
+        }
+    }
+    return $null
+}
+
+function Read-UsbConfig {
+    try {
+        $c = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+        return @($c.pis | Where-Object { $_ -and $_.address })
+    } catch {
+        return @()
+    }
+}
+
+function Save-UsbConfig($Pis) {
+    New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+    ([pscustomobject]@{ pis = @($Pis) } | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+}
+
+function Read-PiAddress {
+    while ($true) {
+        $reply = (Read-Host "    Type the Pi's address (on the TV: Settings > USB sharing), or press Enter to skip").Trim()
+        if ($reply -eq '') { return $null }
+        if (Test-UsbipServer $reply) {
+            $mac = Get-Mac $reply
+            return [pscustomobject]@{ name = (Get-PiName $reply $mac); address = $reply; mac = $mac }
+        }
+        Write-Warn "Nothing answered at $reply. Check the address, and that USB sharing is on (Settings > USB sharing)."
+    }
+}
+
+# Which Pi(s) this PC takes USB devices from: the ones it already knows if they
+# still answer, otherwise the ones found on the network (confirmed by you).
+function Select-Pis {
+    $known = @(Read-UsbConfig | Where-Object { Test-UsbipServer $_.address })
+    if ($known.Count -gt 0) {
+        foreach ($pi in $known) {
+            $mac = Get-Mac $pi.address
+            if ($mac) { $pi | Add-Member -NotePropertyName mac -NotePropertyValue $mac -Force }
+            $pi | Add-Member -NotePropertyName name -NotePropertyValue (Get-PiName $pi.address $pi.mac) -Force
+            Write-Ok "Using $($pi.name) ($($pi.address))"
+        }
+        return $known
+    }
+    $found = @(Find-Pis)
+    if ($found.Count -eq 1) {
+        $pi = $found[0]
+        if (Read-YesNo "Found $($pi.name) ($($pi.address)). Use it?" $true) { return @($pi) }
+    } elseif ($found.Count -gt 1) {
+        Write-Info 'Found more than one:'
+        for ($i = 0; $i -lt $found.Count; $i++) {
+            Write-Info ('  {0}. {1} ({2})' -f ($i + 1), $found[$i].name, $found[$i].address)
+        }
+        while ($true) {
+            $reply = (Read-Host '    Which one? Type its number, several separated by commas, or press Enter for all').Trim()
+            if ($reply -eq '') { return $found }
+            $picked = @($reply -split '[,\s]+' | Where-Object { $_ -match '^\d+$' -and [int]$_ -ge 1 -and [int]$_ -le $found.Count } |
+                ForEach-Object { $found[[int]$_ - 1] })
+            if ($picked.Count -gt 0) { return $picked }
+            Write-Info "Please type a number from 1 to $($found.Count)."
+        }
+    } else {
+        Write-Warn "Couldn't find your Pi on this network. Check it's switched on, set up, and that USB"
+        Write-Warn 'sharing is on (on the TV: Settings > USB sharing).'
+    }
+    $pi = Read-PiAddress
+    if ($pi) { return @($pi) }
+    return @()
+}
+
+# ---------------------------------------------------------------------------
+# The helper
+# ---------------------------------------------------------------------------
+function Get-HelperProcesses {
+    Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like "*$HelperName*" }
+}
+
+function Stop-Helper {
+    foreach ($p in Get-HelperProcesses) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+function Get-HelperArguments {
+    "--headless `"$PowerShellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$HelperPath`""
+}
+
+function Start-Helper {
+    Start-Process -FilePath $Conhost -ArgumentList (Get-HelperArguments) -WindowStyle Hidden
+}
+
+function Install-Helper {
+    New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+    Stop-Helper
+    Remove-Item -LiteralPath $HelperLog -Force -ErrorAction SilentlyContinue
+    # From next to this script when it's run from a copy of the project, otherwise from GitHub.
+    $local = if ($PSScriptRoot) { Join-Path $PSScriptRoot $HelperName } else { $null }
+    if ($local -and (Test-Path -LiteralPath $local)) {
+        Copy-Item -LiteralPath $local -Destination $HelperPath -Force
+    } else {
+        Invoke-WebRequest -Uri "$RawUrl/windows/$HelperName" -OutFile $HelperPath -UseBasicParsing
+    }
+    # Started hidden when you log in: conhost --headless shows no window at all.
     $shell = New-Object -ComObject WScript.Shell
     $s = $shell.CreateShortcut($StartupLink)
-    $s.TargetPath = $Exe
-    $s.WorkingDirectory = Split-Path $Exe
-    $s.WindowStyle = 7   # minimised
-    $s.Description = 'VirtualHere client (moonlight-pi-setup)'
+    $s.TargetPath = $Conhost
+    $s.Arguments = Get-HelperArguments
+    $s.WorkingDirectory = $AppDir
+    $s.WindowStyle = 7
+    $s.Description = 'Moonlight Pi USB sharing (moonlight-pi-setup)'
     $s.Save()
-    Write-Ok 'VirtualHere will start with Windows'
+    Start-Helper
+    Write-Ok 'The USB sharing helper starts hidden when you log in, and is running now'
 }
 
-function Install-VirtualHere {
-    Write-Step 'VirtualHere client'
-    $exe = Find-VhClient
-    $isNew = $false
-    if ($exe) {
-        Write-Ok "Using the VirtualHere client at $exe"
+# Gives back any devices attached from the Pi(s) right away (the Pi would take
+# them back by itself anyway, 30 seconds after the helper stops asking).
+function Disconnect-PiDevices {
+    if (-not (Test-Path -LiteralPath $UsbipExe)) { return }
+    $addresses = @(Read-UsbConfig | ForEach-Object { $_.address; $_.tailscale } | Where-Object { $_ })
+    $rc, $out = Invoke-Usbip @('port')
+    foreach ($m in [regex]::Matches($out, '(?s)Port (\d+):.*?usbip://(\[[^\]]+\]|[^:/\s]+):\d+/(\S+)')) {
+        $port, $addr, $id = $m.Groups[1].Value, $m.Groups[2].Value.Trim('[', ']'), $m.Groups[3].Value
+        if ($addresses -contains $addr) {
+            Invoke-Usbip @('detach', '-p', [string][int]$port) | Out-Null
+            Invoke-Usbip @('attach', '-r', $addr, '-b', $id, '--stop') | Out-Null
+        }
+    }
+}
+
+function Remove-UsbSharing {
+    Write-Step 'Removing USB sharing from this PC'
+    $installedHere = Test-Path -LiteralPath $InstalledMarker
+    Stop-Helper
+    Disconnect-PiDevices
+    Remove-Item -LiteralPath $StartupLink -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $AppDir) { Remove-Item -LiteralPath $AppDir -Recurse -Force }
+    Write-Ok 'Removed the USB sharing helper'
+    if (-not (Get-UsbipInstalledVersion)) { return }
+    $others = Get-OtherUsbipUsers
+    if (-not $installedHere) {
+        Write-Info "usbip-win2 was on this PC before USB sharing was set up, so it's left installed."
+    } elseif ($others) {
+        Write-Info "usbip-win2 stays installed, because $($others -join ' and ') uses it too."
     } else {
-        $exe = Install-VhClient
-        $isNew = $true
+        Uninstall-Usbip
     }
-    Set-VhStartup $exe
-    Set-VhRefreshPeriod $exe
-    if (-not (Get-VhClientProcess $exe)) {
-        Start-VhClient $exe
-        Write-Ok 'Started the VirtualHere client'
+}
+
+# Waits for the helper to reach the Pi (it logs when it does).
+function Test-HelperConnected($Pis) {
+    for ($i = 0; $i -lt 16; $i++) {
+        if (Test-Path -LiteralPath $HelperLog) {
+            $log = Get-Content -LiteralPath $HelperLog -Raw
+            $done = @($Pis | Where-Object { $log -match [regex]::Escape("Connected to $($_.name) at") })
+            if ($done.Count -eq @($Pis).Count) { return $true }
+        }
+        Start-Sleep -Milliseconds 500
     }
-    if ($isNew) {
-        Write-Info 'The first time it runs, VirtualHere asks for permission to install its USB'
-        Write-Info 'driver. Say Yes, or USB devices from the Pi will not work.'
+    return $false
+}
+
+# ---------------------------------------------------------------------------
+# USB sharing
+# ---------------------------------------------------------------------------
+function Set-UpUsbSharing {
+    Write-Step 'USB sharing'
+    if (Test-Path -LiteralPath $HelperPath) {
+        Write-Info 'USB sharing is set up on this PC.'
+        $reply = (Read-Host '    Press Enter to check and repair it, or type R to remove it from this PC').Trim().ToLower()
+        if ($reply -in 'r', 'remove') {
+            Remove-UsbSharing
+            return
+        }
+    } else {
+        Write-Info 'USB devices plugged into the Pi, like a wired controller, can come to this PC while'
+        Write-Info "you stream, as if they were plugged in here. This installs usbip-win2 (free and open"
+        Write-Info 'source), which needs administrator permission once.'
+        if (-not (Read-YesNo 'Share USB devices plugged into the Pi with this PC?' $true)) {
+            Write-Info 'Skipped. Run this script again any time to set it up.'
+            return
+        }
+    }
+    Test-WindowsVersion
+    Install-Usbip
+    $pis = @(Select-Pis)
+    if ($pis.Count -eq 0) {
+        Write-Warn 'No Pi chosen, so USB sharing is not set up yet. Run this script again when the Pi is on.'
+        return
+    }
+    foreach ($pi in $pis) {
+        $ts = Find-TailscaleAddress $pi
+        if ($ts) { $pi | Add-Member -NotePropertyName tailscale -NotePropertyValue $ts -Force }
+    }
+    Save-UsbConfig $pis
+    Install-Helper
+    if (Test-HelperConnected $pis) {
+        foreach ($pi in $pis) {
+            Write-Ok "Connected to $($pi.name). Its USB devices come to this PC while you stream."
+        }
+        Write-Info 'Choose which devices go to the PC on the TV: Settings > USB sharing (controllers'
+        Write-Info 'and headsets go by themselves).'
+    } else {
+        Write-Warn "The helper hasn't reached the Pi yet. Its log: $HelperLog"
     }
 }
 
@@ -237,7 +559,7 @@ function Install-VirtualHere {
 # ---------------------------------------------------------------------------
 function Test-TailscaleInstalled {
     return [bool](Get-Service -Name 'Tailscale' -ErrorAction SilentlyContinue) -or
-        (Test-Path 'C:\Program Files\Tailscale\tailscale.exe')
+        (Test-Path -LiteralPath $TailscaleExe)
 }
 
 function Install-Tailscale {
@@ -278,7 +600,7 @@ function Install-Tailscale {
 function Invoke-MoonlightPcSetup {
     Write-Host "Moonlight PC Setup $PcSetupVersion (for moonlight-pi-setup)" -ForegroundColor White
     try {
-        Install-VirtualHere
+        Set-UpUsbSharing
         Install-Tailscale
     } catch {
         Write-Host ''
@@ -288,11 +610,14 @@ function Invoke-MoonlightPcSetup {
     }
 
     Write-Step 'All done'
-    Write-Info 'Last step, in VirtualHere: choose which USB devices move from the Pi to this PC.'
-    Write-Info 'If the Pi shares devices only while streaming, start a stream first, so the'
-    Write-Info "devices appear. Then right-click a device and choose Auto-Use Device (it moves"
-    Write-Info 'whichever USB port it is in) or Auto-Use Port (anything in that port moves).'
-    Write-Info 'From then on it moves to this PC by itself whenever you stream.'
+    if ($script:RestartNeeded) {
+        Write-Info 'Windows needs a restart to finish installing (or removing) the USB driver.'
+        if (Read-YesNo 'Restart now?' $false) {
+            Restart-Computer
+        } else {
+            Write-Info 'Restart when it suits you.'
+        }
+    }
 }
 
 Invoke-MoonlightPcSetup

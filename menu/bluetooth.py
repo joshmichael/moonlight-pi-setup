@@ -1,11 +1,23 @@
-"""Bluetooth controller pairing through BlueZ (D-Bus)."""
+"""Bluetooth controller pairing through BlueZ (D-Bus).
+
+Controllers use one Bluetooth adapter: the Pi's built-in one, or a USB adapter
+chosen in Controllers > Bluetooth adapter (saved by the settings helper in
+BT_CONFIG). Other adapters, like one that USB sharing sends to the PC, are
+left alone.
+"""
 import glob
 import logging
 import os
+import re
 import threading
 import time
 
 log = logging.getLogger(__name__)
+
+SYS_BT = '/sys/class/bluetooth'
+BT_CONFIG = '/var/lib/moonlight-pi-setup/bluetooth.conf'    # written by the settings helper
+ADDRESS_RE = re.compile(r'^([0-9A-F]{2}:){5}[0-9A-F]{2}$')
+USB_INTERFACE_RE = re.compile(r'^\d+-[\d.]+:\d+\.\d+$')
 
 BLUEZ = 'org.bluez'
 ADAPTER = 'org.bluez.Adapter1'
@@ -69,16 +81,94 @@ def friendly_error(e):
     return msg or name or 'Unknown Bluetooth error'
 
 
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
+# ---------------------------------------------------------------------------
+# Adapters
+# ---------------------------------------------------------------------------
+def load_choice(path=BT_CONFIG):
+    """The USB adapter chosen for controllers: {'address': its Bluetooth
+    address, 'key': its USB sharing key}, or {} for the built-in one."""
+    choice = {}
+    for line in _read(path).splitlines():
+        k, sep, v = line.partition('=')
+        if sep and k in ('address', 'key'):
+            choice[k] = v.strip()
+    return choice if ADDRESS_RE.match(choice.get('address', '')) else {}
+
+
+def usb_address(hci):
+    """The USB address (like 3-2) of the device an adapter is part of, or ''
+    for an adapter that isn't USB (the Pi's built-in one)."""
+    dev = os.path.basename(os.path.realpath(os.path.join(SYS_BT, hci, 'device')))
+    return dev.split(':')[0] if USB_INTERFACE_RE.match(dev) else ''
+
+
+def blocked(hci):
+    """Whether an adapter's radio is switched off (rfkill)."""
+    return any(_read(p) == '1' for p in glob.glob('%s/%s/rfkill*/soft' % (SYS_BT, hci)) +
+               glob.glob('%s/%s/rfkill*/hard' % (SYS_BT, hci)))
+
+
+def hci_address(hci):
+    """An adapter's Bluetooth address, from BlueZ ('' if BlueZ doesn't know it yet)."""
+    try:
+        import dbus
+        obj = dbus.SystemBus().get_object(BLUEZ, '/org/bluez/' + hci)
+        return str(dbus.Interface(obj, PROPS).Get(ADAPTER, 'Address')).upper()
+    except Exception:
+        return ''
+
+
+def adapters(objects):
+    """The adapters BlueZ knows (objects: its GetManagedObjects), the built-in
+    one first, as dicts: path, hci, address, usb (its USB address, '' for the
+    built-in one), key (its key in USB sharing's settings), name, blocked."""
+    import usb_sharing
+    out = []
+    for path, ifaces in objects.items():
+        a = ifaces.get(ADAPTER)
+        if a is None:
+            continue
+        hci = os.path.basename(str(path))
+        usb = usb_address(hci)
+        item = {'path': str(path), 'hci': hci, 'address': str(a.get('Address', '')).upper(), 'usb': usb,
+                'key': '', 'name': 'Built-in Bluetooth', 'blocked': blocked(hci)}
+        if usb:
+            d = os.path.join(usb_sharing.SYS_USB, usb)
+            vid, pid = _read(d + '/idVendor').lower(), _read(d + '/idProduct').lower()
+            item['key'] = usb_sharing.device_key('%s:%s' % (vid, pid), usb_sharing._ident(d, usb))
+            item['name'] = usb_sharing._name(d, vid, pid)
+        out.append(item)
+    return sorted(out, key=lambda a: (bool(a['usb']), a['hci']))
+
+
+def pick(found, choice):
+    """The adapter controllers use: the chosen USB one (None if it isn't plugged
+    in), or else the built-in one (or the first USB one on a Pi without it)."""
+    if choice:
+        return next((a for a in found if a['address'] == choice['address']), None)
+    return found[0] if found else None
+
+
 def paired_gamepad_count():
     """Quick check for the boot decision, without starting the agent."""
     try:
         import dbus
         bus = dbus.SystemBus()
         om = dbus.Interface(bus.get_object(BLUEZ, '/'), OBJECT_MANAGER)
+        objects = om.GetManagedObjects()
+        adapter = pick(adapters(objects), load_choice())
         n = 0
-        for ifaces in om.GetManagedObjects().values():
+        for ifaces in objects.values():
             d = ifaces.get(DEVICE)
-            if not d:
+            if not d or not adapter or str(d.get('Adapter', '')) != adapter['path']:
                 continue
             dev = _device_dict(d)
             if dev['paired'] and dev['bonded'] and is_gamepad(dev):
@@ -175,11 +265,10 @@ class Bluetooth:
     def _objects(self):
         return self._iface('/', OBJECT_MANAGER).GetManagedObjects()
 
-    def _adapter_path(self):
-        for path, ifaces in self._objects().items():
-            if ADAPTER in ifaces:
-                return path
-        return None
+    def _adapter_path(self, objects=None):
+        """The object path of the adapter controllers use, or None."""
+        a = pick(adapters(objects or self._objects()), load_choice())
+        return a['path'] if a else None
 
     def _props(self, path):
         return self._iface(path, PROPS)
@@ -188,34 +277,57 @@ class Bluetooth:
         return self._iface(path, DEVICE)
 
     def _path_for(self, address):
-        for path, ifaces in self._objects().items():
+        objects = self._objects()
+        adapter = self._adapter_path(objects)
+        for path, ifaces in objects.items():
             d = ifaces.get(DEVICE)
-            if d and str(d.get('Address', '')).upper() == address.upper():
+            if d and str(d.get('Adapter', '')) == adapter and str(d.get('Address', '')).upper() == address.upper():
                 return path
         raise BluetoothError('The controller is no longer visible. Put it in pairing mode again.')
 
     # -- public -------------------------------------------------------------
     def available(self):
+        """Whether BlueZ is running with an adapter (the one controllers use
+        may still be unplugged: see state())."""
         try:
-            return self._adapter_path() is not None
+            return any(ADAPTER in ifaces for ifaces in self._objects().values())
         except Exception:
             return False
+
+    def state(self):
+        """{'adapters': every adapter, 'adapter': the one controllers use (None if
+        it isn't plugged in), 'choice': load_choice(), 'devices': devices()}."""
+        objects = self._objects()
+        found = adapters(objects)
+        choice = load_choice()
+        adapter = pick(found, choice)
+        return {'adapters': found, 'adapter': adapter, 'choice': choice,
+                'devices': self._devices(objects, adapter['path'] if adapter else None)}
 
     def ensure_powered(self):
         path = self._adapter_path()
         if not path:
+            if load_choice():
+                raise BluetoothError("Your USB Bluetooth adapter isn't plugged in.")
             raise BluetoothError("This Pi's Bluetooth isn't available.")
         props = self._props(path)
         if not props.Get(ADAPTER, 'Powered'):
-            props.Set(ADAPTER, 'Powered', True)
+            try:
+                props.Set(ADAPTER, 'Powered', True)
+            except self.dbus.exceptions.DBusException:
+                raise BluetoothError("Couldn't switch the Bluetooth adapter on. Try again in a moment.")
         return path
 
     def devices(self):
-        """All known Bluetooth devices, as dicts."""
+        """The Bluetooth devices the adapter controllers use knows, as dicts."""
+        objects = self._objects()
+        return self._devices(objects, self._adapter_path(objects))
+
+    def _devices(self, objects, adapter):
         result = []
-        for ifaces in self._objects().values():
+        for ifaces in objects.values():
             d = ifaces.get(DEVICE)
-            if not d:
+            if not d or str(d.get('Adapter', '')) != adapter:
                 continue
             dev = _device_dict(d)
             dev['gamepad'] = is_gamepad(dev)
@@ -269,7 +381,8 @@ class Bluetooth:
 
     def _rediscover(self, address, seconds=20):
         """Searches until the controller shows up again; returns its object path."""
-        adapter = self._iface(self._adapter_path(), ADAPTER)
+        path = self._adapter_path()
+        adapter = self._iface(path, ADAPTER)
         try:
             adapter.StartDiscovery()
         except self.dbus.exceptions.DBusException:
@@ -279,7 +392,8 @@ class Bluetooth:
             while time.monotonic() < deadline:
                 for p, ifaces in self._objects().items():
                     d = ifaces.get(DEVICE)
-                    if d and str(d.get('Address', '')).upper() == address.upper() and 'RSSI' in d:
+                    if d and str(d.get('Adapter', '')) == path and \
+                            str(d.get('Address', '')).upper() == address.upper() and 'RSSI' in d:
                         return p
                 time.sleep(0.5)
         finally:

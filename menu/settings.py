@@ -26,6 +26,9 @@ CMDLINE = '/boot/firmware/cmdline.txt'
 COUNTRIES = '/usr/share/zoneinfo/iso3166.tab'
 ZONES = '/usr/share/zoneinfo/zone1970.tab'
 LATEST_SCRIPT_URL = 'https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/moonlight-pi-setup.sh'
+PC_SETUP_COMMAND = ('irm https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/windows/'
+                    'moonlight-pc-setup.ps1 | iex')
+PC_SETUP_URL = 'https://github.com/joshmichael/moonlight-pi-setup#setting-up-the-gaming-pc'
 
 TAILSCALE_V4 = ipaddress.ip_network('100.64.0.0/10')
 HOST_OS = ('windows', 'linux', 'macos')       # where a streaming host can run
@@ -163,10 +166,30 @@ def status():
 
 
 def change(name, value):
-    """name: quit-on-shutdown, usb-handoff, virtualhere-tailscale, quiet-boot or
+    """name: quit-on-shutdown, usb-sharing, usb-tailscale, quiet-boot or
     wifi-powersave (value on/off), or wifi-country (value XX)."""
     with _lock:
         return _run([name, value], root=True)
+
+
+def usb_device(key, rule):
+    """What a USB device does: always, never or auto. key: vendor:product, plus
+    /its-own-ID if it has one (usb_sharing.device_key)."""
+    with _lock:
+        return _run(['usb-device', key, rule], root=True)
+
+
+def usb_port(key, on):
+    """Whether anything plugged into a port goes to the PC."""
+    with _lock:
+        return _run(['usb-port', key, 'on' if on else 'off'], root=True)
+
+
+def bt_adapter(address, key=''):
+    """The Bluetooth adapter controllers use: a USB adapter's Bluetooth address
+    and USB sharing key, or 'builtin'. 'apply' switches the chosen one on."""
+    with _lock:
+        return _run(['bt-adapter', address] + ([key] if key else []), root=True)
 
 
 def set_speakers(mode):
@@ -345,6 +368,15 @@ def set_moonlight_manual_address(index, ip, port, path=MOONLIGHT_CONF):
     with open(tmp, 'w', encoding='utf-8', errors='surrogateescape', newline='') as f:
         f.write('\n'.join(lines))
     os.replace(tmp, path)
+
+
+def pc_name(addr):
+    """The name of the PC saved in Moonlight with this address, or ''."""
+    for h in moonlight_hosts():
+        for key in ('localaddress', 'manualaddress', 'remoteaddress', 'ipv6address'):
+            if h.get(key, '').strip('[]') == addr:
+                return h.get('hostname', '')
+    return ''
 
 
 def moonlight_running():

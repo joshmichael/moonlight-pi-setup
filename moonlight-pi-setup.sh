@@ -15,7 +15,7 @@
 #
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.9.0"
+SCRIPT_VERSION="2.0.0"
 
 REPO_URL="https://github.com/joshmichael/moonlight-pi-setup"
 ISSUES_URL="${REPO_URL}/issues"
@@ -43,15 +43,13 @@ LIGHTDM_CONF="/etc/lightdm/lightdm.conf"
 NM_WIFI_CONF="/etc/NetworkManager/conf.d/90-moonlight-pi-setup-wifi.conf"
 
 MOONLIGHT_REPO_SCRIPT="https://dl.cloudsmith.io/public/moonlight-game-streaming/moonlight-qt/setup.deb.sh"
-VH_INSTALL_SCRIPT="https://raw.githubusercontent.com/virtualhere/script/main/install_server"
-VH_UNINSTALL_SCRIPT="https://raw.githubusercontent.com/virtualhere/script/main/uninstall_server"
 
 # Installed here, and by the settings helper
 LIB_DIR="/usr/local/lib/moonlight-pi-setup"
 MENU_DIR="${LIB_DIR}/menu"
 MENU_BIN="/usr/local/bin/moonlight-menu"
 MENU_FILES=(moonlight_menu.py ui.py network.py bluetooth.py wifi_setup.py settings.py settings_screens.py
-            moonlight-settings.sh)
+            usb_sharing.py usb_combo.py usb_screens.py moonlight-settings.sh)
 MENU_PACKAGES=(python3-pygame python3-dbus python3-gi python3-qrcode nftables)
 SETTINGS_HELPER="${LIB_DIR}/moonlight-settings"
 SUDOERS_FILE="/etc/sudoers.d/moonlight-pi-setup"
@@ -61,9 +59,7 @@ PHONE_SERVICE="/etc/systemd/system/${PHONE_SERVICE_NAME}"
 POLKIT_RULE="/etc/polkit-1/rules.d/50-moonlight-pi-setup.rules"
 QUIT_HELPER="/usr/local/bin/moonlight-quit-all"
 QUIT_SERVICE="/etc/systemd/system/moonlight-quit-on-shutdown.service"
-HANDOFF_HELPER="/usr/local/bin/moonlight-usb-handoff"
-HANDOFF_SERVICE="/etc/systemd/system/moonlight-usb-handoff.service"
-VH_TS_SERVICE="/etc/systemd/system/moonlight-virtualhere-tailscale.service"
+USB_SERVICE="/etc/systemd/system/moonlight-usb-sharing.service"
 
 MARK_BEGIN="# >>> moonlight-pi-setup >>>"
 MARK_END="# <<< moonlight-pi-setup <<<"
@@ -74,7 +70,6 @@ FORCE=0
 UNATTENDED=0           # run by the TV menu (updates, uninstall): no questions
 REMOVE_MOONLIGHT=0     # --uninstall: also remove these (chosen on the TV)
 REMOVE_TAILSCALE=0
-REMOVE_VIRTUALHERE=0
 FIRST_INSTALL=0
 OS_CODENAME=""
 HDMI_PORT=""
@@ -87,8 +82,8 @@ AUDIO_MODE="stereo"    # stereo | 5.1 | 7.1
 OPT_QUIET_BOOT=1
 OPT_QUIT_ON_SHUTDOWN=1
 OPT_WIFI_POWERSAVE_OFF=1
-OPT_USB_HANDOFF=1
-OPT_VH_TAILSCALE=0     # VirtualHere over Tailscale: not recommended
+OPT_USB_SHARING=1
+OPT_USB_TAILSCALE=0    # USB sharing over Tailscale: not recommended
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -319,12 +314,6 @@ boot_behaviour_name() {
   esac
 }
 
-virtualhere_installed() {
-  local units
-  units=$(systemctl list-unit-files 2>/dev/null || true)
-  grep -qi virtualhere <<<"$units"
-}
-
 tailscale_installed() {
   command -v tailscale > /dev/null 2>&1
 }
@@ -480,7 +469,7 @@ load_settings() {
     FIRST_INSTALL=1
     return 0
   fi
-  local key value vh=0
+  local key value
   while IFS='=' read -r key value; do
     case "$key" in
       speakers)
@@ -488,15 +477,10 @@ load_settings() {
       quiet_boot) OPT_QUIET_BOOT=$value ;;
       quit_on_shutdown) OPT_QUIT_ON_SHUTDOWN=$value ;;
       wifi_powersave) OPT_WIFI_POWERSAVE_OFF=$(( value == 1 ? 0 : 1 )) ;;
-      virtualhere) vh=$value ;;
-      usb_handoff) OPT_USB_HANDOFF=$value ;;
-      vh_tailscale) OPT_VH_TAILSCALE=$value ;;
+      usb_sharing) OPT_USB_SHARING=$value ;;
+      usb_tailscale) OPT_USB_TAILSCALE=$value ;;
     esac
   done < <(as_user bash "${MENU_SRC}/moonlight-settings.sh" status 2>/dev/null || true)
-  # VirtualHere installed now for the first time: use the recommended setting.
-  if (( ! vh )); then
-    OPT_USB_HANDOFF=1
-  fi
   return 0
 }
 
@@ -507,7 +491,8 @@ show_summary() {
   info "Moonlight:        install the official moonlight-qt package, and start it when the Pi boots"
   info "TV menu:          controllers, Wi-Fi, settings and power, when Moonlight closes"
   info "Tailscale:        $(tailscale_installed && echo "already installed" || echo "install (sign in later on the TV), to stream away from home")"
-  info "VirtualHere:      $(virtualhere_installed && echo "already installed" || echo "install, to send USB devices plugged into the Pi to your PC")"
+  info "USB sharing:      send USB devices plugged into the Pi, like a wired controller, to your PC"
+  info "                  while you stream (USB/IP; the PC is set up with the PC setup script)"
   echo
   if (( FIRST_INSTALL )); then
     info "Settings (recommended for now; after the restart, Quick setup on the TV asks about them):"
@@ -518,8 +503,11 @@ show_summary() {
   info "  End stream on PC:   $( (( OPT_QUIT_ON_SHUTDOWN )) && echo "yes, when the Pi shuts down" || echo no)"
   info "  Hide boot messages: $( (( OPT_QUIET_BOOT )) && echo yes || echo no)"
   info "  Wi-Fi power saving: $(on_off $(( ! OPT_WIFI_POWERSAVE_OFF )))"
-  info "  VirtualHere:        sends USB devices to the PC $( (( OPT_USB_HANDOFF )) && echo "only while streaming" || echo "all the time")"
-  info "                      $( (( OPT_VH_TAILSCALE )) && echo "and works over Tailscale" || echo "(at home only, not over Tailscale)")"
+  local usb=off
+  if (( OPT_USB_SHARING )); then
+    usb="on, $( (( OPT_USB_TAILSCALE )) && echo "also over Tailscale" || echo "at home only (not over Tailscale)")"
+  fi
+  info "  USB sharing:        ${usb}"
   if (( FIRST_INSTALL )) && has_wifi && ! grep -q 'cfg80211.ieee80211_regdom=[A-Z]' /boot/firmware/cmdline.txt 2> /dev/null; then
     info "  Wi-Fi country:      not set yet (Quick setup asks for it; Wi-Fi stays off until then)"
   fi
@@ -857,32 +845,22 @@ install_tailscale() {
   ok "Tailscale installed. To stream away from home, sign in on the TV: Settings > Tailscale."
 }
 
-# VirtualHere's USB server. It does nothing until the VirtualHere client on the
-# PC uses a device.
-install_virtualhere() {
-  virtualhere_installed && return 0
-  step "Installing the VirtualHere USB server"
-  info "Downloading VirtualHere's official installer. The free version shares one USB"
-  info "device at a time. Sharing more needs a licence from virtualhere.com."
-  if curl -fsSL "$VH_INSTALL_SCRIPT" | sudo sh; then
-    state_set virtualhere_installed_by_script 1
-    ok "VirtualHere server installed and set to start at boot"
-  else
-    warn "VirtualHere could not be installed. See https://github.com/virtualhere/script"
+# USB sharing: USB devices plugged into the Pi, like a wired controller, go to
+# the gaming PC while streaming, with USB/IP (usbip is the Linux side of it).
+# Nothing leaves the Pi until the PC is set up with the PC setup script.
+setup_usb_sharing() {
+  step "Setting up USB sharing"
+  if ! package_installed usbip; then
+    sudo apt-get install -y usbip
+    state_set usbip_installed_by_script 1
   fi
-}
-
-# VirtualHere: send USB devices to the PC only while streaming, and keep it off
-# Tailscale unless that's been turned on.
-setup_usb_handoff() {
-  virtualhere_installed || return 0
-  step "Setting up VirtualHere"
-  helper virtualhere-tailscale "$(on_off "$OPT_VH_TAILSCALE")"
-  helper usb-handoff "$(on_off "$OPT_USB_HANDOFF")"
-  if (( OPT_USB_HANDOFF )); then
-    info "During a stream the controller is on the PC, so Moonlight's controller shortcut"
-    info "can't end the stream. Quit the game or app on the PC instead (for example, exit"
-    info "Steam Big Picture), or press Ctrl+Alt+Shift+Q on a keyboard plugged into the Pi."
+  helper usb-tailscale "$(on_off "$OPT_USB_TAILSCALE")"
+  helper usb-sharing "$(on_off "$OPT_USB_SHARING")"
+  if (( OPT_USB_SHARING )); then
+    info "Once your PC is set up, controllers and headsets plugged into the Pi go to it while"
+    info "you stream (choose which on the TV, in Settings > USB sharing). Moonlight's"
+    info "controller shortcut (Select+Start+L1+R1) still ends the stream with PlayStation and"
+    info "Xbox controllers."
   fi
 }
 
@@ -940,15 +918,12 @@ finish_install() {
   echo
   info "Then set up the PC to match: open PowerShell on the gaming PC and paste:"
   info "  irm ${PC_SCRIPT_URL} | iex"
-  info "It sets up the VirtualHere client (downloads it, starts it with Windows, and"
-  info "makes it find the Pi quickly) and can install Tailscale."
+  info "It lets the PC receive USB devices plugged into the Pi while you stream (it installs"
+  info "usbip-win2 and finds this Pi), and can install Tailscale."
+  info "USB sharing: choose which devices and ports go to the PC on the TV, in"
+  info "Settings > USB sharing. Controllers and headsets go by themselves."
   info "Tailscale: sign the Pi in on the TV (Settings > Tailscale). Moonlight then finds"
   info "the PC over Tailscale by itself. Away from home, lower Moonlight's bitrate."
-  info "VirtualHere: in the client on your PC, right-click each device that should move"
-  info "to the PC and choose Auto-Use Device or Auto-Use Port."
-  if (( OPT_USB_HANDOFF )); then
-    info "The Pi's devices only appear there while you're streaming, so start a stream first."
-  fi
   echo
   info "Moonlight log (after reboot): /tmp/moonlight.log"
   info "This run's log:               ${LOG_FILE}"
@@ -987,14 +962,13 @@ remove_menu() {
   ok "Removed the TV menu and its settings helper"
 }
 
-# remove_too <moonlight|tailscale|virtualhere> <question>: whether to remove
-# that too (asked here, or chosen on the TV for the menu's uninstall).
+# remove_too <moonlight|tailscale> <question>: whether to remove that too
+# (asked here, or chosen on the TV for the menu's uninstall).
 remove_too() {
   if (( UNATTENDED )); then
     case "$1" in
       moonlight) (( REMOVE_MOONLIGHT )) ;;
-      tailscale) (( REMOVE_TAILSCALE )) ;;
-      *) (( REMOVE_VIRTUALHERE )) ;;
+      *) (( REMOVE_TAILSCALE )) ;;
     esac
   else
     ask_yes_no "    $2" n
@@ -1071,16 +1045,29 @@ do_uninstall() {
     if [[ -f $QUIT_SERVICE || -f $QUIT_HELPER ]]; then
       helper quit-on-shutdown off
     fi
-    if [[ -f $VH_TS_SERVICE ]]; then
-      helper virtualhere-tailscale on > /dev/null
+    # Gives any shared devices back to the Pi.
+    if [[ -f $USB_SERVICE ]]; then
+      helper usb-sharing off
     fi
-    if [[ -f $HANDOFF_SERVICE || -f $HANDOFF_HELPER ]]; then
-      helper usb-handoff off
+    # Switches the built-in Bluetooth back on, if a USB adapter was chosen.
+    if [[ -f ${ROOT_STATE_DIR}/bluetooth.conf ]]; then
+      helper bt-adapter builtin
     fi
   fi
 
   # TV menu and settings helper
   remove_menu
+
+  # USB sharing's Linux side (part of the setup, so it's always removed)
+  if [[ $(state_get usbip_installed_by_script) == 1 ]] && package_installed usbip; then
+    sudo apt-get remove -y usbip || warn "Could not remove the usbip package."
+    # usb.ids (the USB device names) came with it: remove it too, unless it was
+    # chosen by hand or something else installed needs it.
+    if package_installed usb.ids && [[ $(apt-mark showauto usb.ids) == usb.ids ]] \
+       && ! apt-cache rdepends --installed usb.ids 2>/dev/null | tail -n +3 | grep -q .; then
+      sudo apt-get remove -y usb.ids > /dev/null || true
+    fi
+  fi
 
   # Optional software
   if package_installed moonlight-qt && remove_too moonlight "Also uninstall Moonlight?"; then
@@ -1095,9 +1082,6 @@ do_uninstall() {
     sudo tailscale down || true
     sudo apt-get remove -y tailscale || warn "Could not remove Tailscale."
   fi
-  if [[ $(state_get virtualhere_installed_by_script) == 1 ]] && remove_too virtualhere "Also uninstall VirtualHere?"; then
-    curl -fsSL "$VH_UNINSTALL_SCRIPT" | sudo sh || warn "Could not remove VirtualHere."
-  fi
 
   # Forget the settings, but remember the software this script installed that is
   # still there, so a later --uninstall (after reinstalling) can still remove it.
@@ -1107,9 +1091,6 @@ do_uninstall() {
   fi
   if [[ $ts_by_script == 1 ]] && tailscale_installed; then
     kept+=$'tailscale_installed_by_script=1\n'
-  fi
-  if [[ $(state_get virtualhere_installed_by_script) == 1 ]] && virtualhere_installed; then
-    kept+=$'virtualhere_installed_by_script=1\n'
   fi
   if [[ -n $kept ]]; then
     printf '%s' "$kept" > "$STATE_FILE"
@@ -1147,7 +1128,7 @@ Usage: $0 [option]
                  the desktop version of Raspberry Pi OS (unsupported)
   --unattended   No questions, keep everything as it is (used by the TV menu's
                  updates and uninstall)
-  --remove-moonlight, --remove-tailscale, --remove-virtualhere
+  --remove-moonlight, --remove-tailscale
                  With --uninstall --unattended: also remove these
   --help         Show this help
   --version      Show the version
@@ -1165,7 +1146,6 @@ main() {
       --unattended)         UNATTENDED=1 ;;
       --remove-moonlight)   REMOVE_MOONLIGHT=1 ;;
       --remove-tailscale)   REMOVE_TAILSCALE=1 ;;
-      --remove-virtualhere) REMOVE_VIRTUALHERE=1 ;;
       --help|-h)            usage; exit 0 ;;
       --version)            echo "$SCRIPT_VERSION"; exit 0 ;;
       *)                    usage; exit 1 ;;
@@ -1200,8 +1180,7 @@ main() {
   setup_quiet_boot
   setup_quit_on_shutdown
   install_tailscale
-  install_virtualhere
-  setup_usb_handoff
+  setup_usb_sharing
   finish_install
 }
 

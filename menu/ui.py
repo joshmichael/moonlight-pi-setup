@@ -305,9 +305,10 @@ def tick_mark(surf, center):
     pygame.draw.lines(surf, WHITE, False, [(x - 55, y), (x - 15, y + 45), (x + 60, y - 45)], 18)
 
 
-def numbered_steps(surf, x, y, width, steps):
-    """Steps numbered 1, 2, 3..., each a (heading, text) pair. Returns the y below them."""
-    for num, (head, body) in enumerate(steps, 1):
+def numbered_steps(surf, x, y, width, steps, first=1):
+    """Steps numbered 1, 2, 3... (or from first), each a (heading, text) pair.
+    Returns the y below them."""
+    for num, (head, body) in enumerate(steps, first):
         pygame.draw.circle(surf, ACCENT, (x + 30, y + 30), 30)
         draw_text(surf, str(num), (x + 30, y + 30), 34, WHITE, bold=True, anchor='center')
         draw_text(surf, head, (x + 84, y + 8), 36, TEXT, bold=True, max_width=width - 84)
@@ -352,11 +353,13 @@ def wifi_qr_text(ssid, password):
 # ---------------------------------------------------------------------------
 class Item:
     """A list row. toggle=True/False draws an On/Off switch; desc is shown in
-    the info panel of screens that describe the highlighted row."""
+    the info panel of screens that describe the highlighted row. A disabled
+    row is greyed out but can still be highlighted, so the panel can say why
+    (reason); choosing it shows the reason instead of doing anything."""
 
     def __init__(self, label, action=None, detail='', key=None, selectable=True,
                  color=None, detail_color=None, signal=None, locked=False, spinner=False,
-                 toggle=None, desc=''):
+                 toggle=None, desc='', disabled=False, reason=''):
         self.label = label
         self.action = action
         self.detail = detail
@@ -369,14 +372,20 @@ class Item:
         self.spinner = spinner
         self.toggle = toggle
         self.desc = desc
+        self.disabled = disabled
+        self.reason = reason
 
 
-def switch(surf, x, cy, on):
-    """An On/Off switch 76 px wide, vertically centred on cy."""
+def switch(surf, x, cy, on, dim=False):
+    """An On/Off switch 76 px wide, vertically centred on cy (greyed out if dim)."""
     def draw(s, k):
-        pygame.draw.rect(s, GOOD if on else (70, 77, 94), (0, 0, 76 * k, 42 * k), border_radius=21 * k)
-        pygame.draw.circle(s, WHITE if on else (196, 201, 212), ((55 if on else 21) * k, 21 * k), 16 * k)
-    surf.blit(_icon(('switch', on), (76, 42), draw), (x, cy - 21))
+        if dim:
+            track, knob = ((48, 84, 66) if on else (52, 57, 70)), (120, 126, 140)
+        else:
+            track, knob = (GOOD if on else (70, 77, 94)), (WHITE if on else (196, 201, 212))
+        pygame.draw.rect(s, track, (0, 0, 76 * k, 42 * k), border_radius=21 * k)
+        pygame.draw.circle(s, knob, ((55 if on else 21) * k, 21 * k), 16 * k)
+    surf.blit(_icon(('switch', on, dim), (76, 42), draw), (x, cy - 21))
     return 76
 
 
@@ -466,14 +475,20 @@ class ListView:
             r = pygame.Rect(self.rect.x, y, self.rect.width, self.item_h)
             self.rects.append((i, r))
             selected = i == self.index and it.selectable
-            if selected:
+            if selected and it.disabled:
+                rrect(surf, PANEL_HI, r, 18)
+                rrect(surf, ACCENT, r, 18, 3)
+            elif selected:
                 rrect(surf, ACCENT, r, 18)
             elif it.selectable:
                 rrect(surf, PANEL, r, 18)
-            label_color = WHITE if selected else (it.color or (TEXT if it.selectable else DIM))
+            if it.disabled:
+                label_color = FAINT
+            else:
+                label_color = WHITE if selected else (it.color or (TEXT if it.selectable else DIM))
             right = r.right - 28
             if it.toggle is not None:
-                switch(surf, right - 76, r.centery, it.toggle)
+                switch(surf, right - 76, r.centery, it.toggle, dim=it.disabled)
                 right -= 76 + 24
             if it.signal is not None:
                 signal_bars(surf, right - 44, r.centery, it.signal, WHITE if selected else TEXT)
@@ -485,7 +500,7 @@ class ListView:
                 spinner(surf, (right - 24, r.centery), 18, WHITE if selected else ACCENT, 5)
                 right -= 64
             if it.detail:
-                dcolor = WHITE if selected else (it.detail_color or DIM)
+                dcolor = FAINT if it.disabled else WHITE if selected else (it.detail_color or DIM)
                 dr = draw_text(surf, it.detail, (right, r.centery), 30, dcolor, anchor='midright',
                                max_width=r.width // 2)
                 right = dr.left - 24
@@ -496,7 +511,7 @@ class ListView:
             while size > 30 and font(size, True).size(it.label)[0] > max_w:
                 size -= 2
             draw_text(surf, it.label, (r.x + 32, r.centery), size, label_color,
-                      bold=selected, anchor='midleft', max_width=max_w)
+                      bold=selected and not it.disabled, anchor='midleft', max_width=max_w)
             y += self.item_h + self.gap
         if self.scroll > 0:
             pygame.draw.polygon(surf, DIM, [(self.rect.centerx - 14, self.rect.y - 14),
@@ -573,7 +588,9 @@ class ListScreen(Screen):
             self.list.move(1)
         elif action in ('select', 'enter'):
             it = self.list.selected
-            if it and it.action:
+            if it and it.disabled:
+                self.app.show_toast(it.reason or "This isn't available")
+            elif it and it.action:
                 it.action()
         elif action in BACK:
             self.app.pop()

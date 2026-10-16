@@ -28,14 +28,8 @@ DESCRIPTIONS = {
                 'to match.',
     'quit': 'When the Pi is switched off, for example with its power button, it tells your PC to end the stream, '
             'so the PC isn\'t left stuck on it. The game you\'re streaming closes, so save first.',
-    'virtualhere': 'VirtualHere sends USB devices plugged into the Pi, like a wired controller, to your PC as if '
-                   'they were plugged into it. Choose when, and whether it works over Tailscale.',
-    'usb': 'On: USB devices plugged into the Pi, like a wired controller, stay on the Pi between streams, so they '
-           'work in this menu and in Moonlight. VirtualHere sends them to your PC while you\'re streaming. '
-           'Off: VirtualHere sends them to your PC all the time.',
-    'vh_tailscale': 'Not recommended. Lets your PC use the Pi\'s USB devices when you\'re streaming away from home, '
-                    'over Tailscale. It adds input lag and stutter, and away from home controllers work better '
-                    'through Moonlight. Off: VirtualHere only works at home.',
+    'usb': 'Send USB devices plugged into the Pi, like a wired controller, to your PC while you stream, as if '
+           'they were plugged into it. Choose which devices and ports, and set up your PC.',
     'tailscale': 'Stream when you\'re away from home: see whether Tailscale is connected, sign in with your '
                  'phone, or turn it off.',
     'powersave': 'Power saving can make Wi-Fi doze between packets, which can cause stutter and lag spikes when '
@@ -46,9 +40,15 @@ DESCRIPTIONS = {
     'updates': 'Update Moonlight and the system, or this setup.',
     'about': 'Network addresses, versions, temperature and power.',
     'quick': 'Go through the first-time questions again: speakers, ending the stream at shutdown, and more.',
-    'uninstall': 'Remove this setup: the TV menu, its settings and auto-start. You can also remove Moonlight, '
-                 'Tailscale and VirtualHere. The Pi then restarts the way it started before the setup.',
+    'uninstall': 'Remove this setup: the TV menu, its settings and auto-start. You can also remove Moonlight '
+                 'and Tailscale. The Pi then restarts the way it started before the setup.',
 }
+
+
+def usb_screens():
+    """The USB sharing screens (imported when first needed: they use this module)."""
+    import usb_screens as module
+    return module
 
 
 def on_off(v):
@@ -61,6 +61,8 @@ def describe(surf, rect, it, size=30):
     y = draw_wrapped(surf, it.label, (rect.x, rect.y), rect.width, 36, TEXT, bold=True) + 12
     if it.desc:
         y = draw_wrapped(surf, it.desc, (rect.x, y), rect.width, size, DIM, line_gap=6) + 20
+    if it.disabled and it.reason:
+        y = draw_wrapped(surf, it.reason, (rect.x, y), rect.width, size, WARN, line_gap=6) + 20
     return y
 
 
@@ -92,7 +94,8 @@ def play_speaker_test(app, mode):
 # ---------------------------------------------------------------------------
 class ChoiceScreen(ListScreen):
     """options: [(value, label, description, tag)]. The current value is
-    marked "Current" (or, with show_current=False, each option shows its tag)."""
+    marked "Current" (or, with show_current=False, each option shows its tag).
+    unavailable: {value: why}, for options shown greyed out."""
 
     def __init__(self, app, title, heading, intro, options, current=None, on_pick=None,
                  show_current=True, initial=None, step=''):
@@ -107,6 +110,7 @@ class ChoiceScreen(ListScreen):
         self.initial = initial if initial is not None else current
         self.step = step
         self.placed = False
+        self.unavailable = {}
 
     def refresh(self):
         items = []
@@ -115,7 +119,8 @@ class ChoiceScreen(ListScreen):
             if self.show_current and value == self.current:
                 detail, color = 'Current', GOOD
             items.append(Item(label, lambda v=value: self.on_pick(v), key=value, detail=detail,
-                              detail_color=color, desc=desc))
+                              detail_color=color, desc=desc, disabled=value in self.unavailable,
+                              reason=self.unavailable.get(value, '')))
         items += self.extra_items()
         self.list.set_items(items)
         if not self.placed:
@@ -156,6 +161,8 @@ class ChoiceScreen(ListScreen):
             y += 22
             y = draw_text(surf, it.label, (rect.x, y), 29, ACCENT, bold=True, max_width=rect.width).bottom + 8
             y = draw_wrapped(surf, it.desc, (rect.x, y), rect.width, 29, TEXT, line_gap=6) + 10
+            if it.disabled and it.reason:
+                y = draw_wrapped(surf, it.reason, (rect.x, y + 6), rect.width, 29, WARN, line_gap=6) + 10
         self.draw_more(surf, rect, y)
 
     def draw_more(self, surf, rect, y):
@@ -322,21 +329,23 @@ class SettingsScreen(SettingsListScreen):
                  lambda: self.toggle('quit-on-shutdown', 'quit_on_shutdown', 'End stream at shutdown'),
                  key='quit', toggle=st.get('quit_on_shutdown') == '1', desc=DESCRIPTIONS['quit']),
         ]
-        if st.get('virtualhere') == '1':
-            items.append(Item('VirtualHere', lambda: app.push(VirtualHereScreen(app)), key='virtualhere',
-                              desc=DESCRIPTIONS['virtualhere']))
+        usb_on = st.get('usb_sharing') == '1'
+        items.append(Item('USB sharing', lambda: app.push(usb_screens().UsbSharingScreen(app)), key='usb',
+                          detail='On' if usb_on else 'Off', detail_color=GOOD if usb_on else None,
+                          desc=DESCRIPTIONS['usb']))
         items.append(Item('Tailscale', lambda: app.push(TailscaleScreen(app)), key='tailscale', detail=ts_text,
                           detail_color=ts_color, desc=DESCRIPTIONS['tailscale']))
-        if st.get('wifi') == '1':
-            code = st.get('wifi_country', '')
-            items += [
-                Item('Wi-Fi power saving', lambda: self.toggle('wifi-powersave', 'wifi_powersave',
-                                                               'Wi-Fi power saving'),
-                     key='powersave', toggle=st.get('wifi_powersave') == '1', desc=DESCRIPTIONS['powersave']),
-                Item('Wi-Fi country', lambda: app.push(CountryScreen(app, code, self.load)), key='country',
-                     detail=settings.country_name(code) if code else 'Not set', detail_color=None if code else WARN,
-                     desc=DESCRIPTIONS['country']),
-            ]
+        wifi = st.get('wifi') == '1'
+        code = st.get('wifi_country', '')
+        items += [
+            Item('Wi-Fi power saving', lambda: self.toggle('wifi-powersave', 'wifi_powersave', 'Wi-Fi power saving'),
+                 key='powersave', toggle=wifi and st.get('wifi_powersave') == '1', desc=DESCRIPTIONS['powersave'],
+                 disabled=not wifi, reason='This Pi has no Wi-Fi.'),
+            Item('Wi-Fi country', lambda: app.push(CountryScreen(app, code, self.load)), key='country',
+                 detail=(settings.country_name(code) if code else 'Not set') if wifi else '',
+                 detail_color=None if code else WARN, desc=DESCRIPTIONS['country'],
+                 disabled=not wifi, reason='This Pi has no Wi-Fi.'),
+        ]
         version = settings.setup_version()
         items += [
             Item('Hide boot messages', lambda: self.toggle('quiet-boot', 'quiet_boot', 'Hide boot messages'),
@@ -370,57 +379,6 @@ class SettingsScreen(SettingsListScreen):
             draw_text(surf, 'Address: %s' % self.ts['ip'], (rect.x, y), 30, TEXT, max_width=rect.width)
         elif it.key == 'quiet' and self.restart_needed():
             draw_wrapped(surf, 'Restart the Pi to apply this change.', (rect.x, y), rect.width, 30, WARN)
-
-
-class VirtualHereScreen(SettingsListScreen):
-    title = 'VirtualHere'
-
-    def loaded(self):
-        if self.error:
-            self.app.message("Couldn't read the VirtualHere settings", self.error)
-
-    def refresh(self):
-        st = self.status
-        if st is None:
-            self.list.set_items([Item('Loading…', selectable=False, spinner=True)])
-            return
-        self.list.set_items([
-            Item('Send USB to PC only while streaming',
-                 lambda: self.toggle('usb-handoff', 'usb_handoff', 'Send USB to PC only while streaming'),
-                 key='usb', toggle=st.get('usb_handoff') == '1', desc=DESCRIPTIONS['usb']),
-            Item('Use VirtualHere over Tailscale', self._tailscale, key='tailscale',
-                 toggle=st.get('vh_tailscale') == '1', desc=DESCRIPTIONS['vh_tailscale']),
-        ])
-
-    def _tailscale(self):
-        app = self.app
-        st = self.status
-        if st.get('vh_tailscale') == '1':
-            self.switch_setting('virtualhere-tailscale', 'vh_tailscale', False, 'VirtualHere over Tailscale')
-        elif st.get('tailscale') != '1':
-            app.message("Tailscale isn't installed", 'Install Tailscale and sign in first, in Settings > Tailscale.')
-        else:
-            app.confirm('Use VirtualHere over Tailscale?',
-                        "This isn't recommended: it adds input lag and stutter, and away from home controllers work "
-                        "better through Moonlight. Your PC's VirtualHere client also needs the Pi's Tailscale "
-                        "address.", 'Turn on',
-                        lambda: self.switch_setting('virtualhere-tailscale', 'vh_tailscale', True,
-                                                    'VirtualHere over Tailscale'))
-
-    def draw_panel(self, surf, rect):
-        it = self.list.selected
-        if not it:
-            return
-        st = self.status
-        y = describe(surf, rect, it, 29)
-        if it.key == 'tailscale' and st.get('vh_tailscale') == '1':
-            ip = self.ts.get('ip') or "the Pi's Tailscale address"
-            draw_wrapped(surf, 'On your PC, in the VirtualHere client: right-click USB Hubs, choose Specify Hubs, and '
-                         'add %s:%s' % (ip, st.get('vh_port') or '7575'), (rect.x, y), rect.width, 29, TEXT,
-                         line_gap=6)
-        elif it.key == 'usb':
-            draw_wrapped(surf, 'Choose which devices go to your PC in the VirtualHere client on the PC: right-click a '
-                         'device and choose Auto-Use.', (rect.x, y), rect.width, 28, FAINT, line_gap=6)
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +503,7 @@ class TailscaleScreen(ListScreen):
                              line_gap=6) + 14
         y = draw_wrapped(surf, "Away from home, lower Moonlight's bitrate.", (rect.x, y), rect.width, 28, DIM,
                          line_gap=6) + 14
-        draw_wrapped(surf, 'VirtualHere only works at home, unless it\'s allowed in Settings > VirtualHere (not '
+        draw_wrapped(surf, 'USB sharing only works at home, unless it\'s allowed in Settings > USB sharing (not '
                      'recommended).', (rect.x, y), rect.width, 28, FAINT)
 
 
@@ -958,14 +916,13 @@ class AboutScreen(Screen):
 # ---------------------------------------------------------------------------
 # Uninstall
 # ---------------------------------------------------------------------------
-# (name, status key saying it can be removed, label, description)
+# (name, status key saying it can be removed, label, description, why it can't be)
 REMOVE_CHOICES = [
     ('moonlight', 'moonlight_installed', 'Also remove Moonlight',
      'Uninstalls the Moonlight app. Its settings and pairing with your PC are kept, in case you install it '
-     'again.'),
-    ('tailscale', 'tailscale_by_setup', 'Also remove Tailscale', 'Signs the Pi out of Tailscale and uninstalls it.'),
-    ('virtualhere', 'virtualhere_by_setup', 'Also remove VirtualHere',
-     "Uninstalls the VirtualHere USB server from the Pi. The client on your PC isn't changed."),
+     'again.', "Moonlight isn't installed."),
+    ('tailscale', 'tailscale_by_setup', 'Also remove Tailscale', 'Signs the Pi out of Tailscale and uninstalls it.',
+     "Tailscale wasn't installed by this setup, so it's left as it is."),
 ]
 
 
@@ -978,8 +935,9 @@ class UninstallScreen(ListScreen):
         self.remove = set()
 
     def refresh(self):
-        items = [Item(label, lambda n=name: self._flip(n), key=name, toggle=name in self.remove, desc=desc)
-                 for name, key, label, desc in REMOVE_CHOICES if self.status.get(key) == '1']
+        items = [Item(label, lambda n=name: self._flip(n), key=name, toggle=name in self.remove, desc=desc,
+                      disabled=self.status.get(key) != '1', reason=reason)
+                 for name, key, label, desc, reason in REMOVE_CHOICES]
         items.append(Item('Uninstall', self._confirm, key='go', color=BAD,
                           desc='Removes this setup, and anything switched on above, then restarts the Pi.'))
         self.list.set_items(items)
@@ -989,7 +947,7 @@ class UninstallScreen(ListScreen):
         self.refresh()
 
     def _chosen(self):
-        return [(name, label) for name, _, label, _ in REMOVE_CHOICES if name in self.remove]
+        return [(name, label) for name, _, label, _, _ in REMOVE_CHOICES if name in self.remove]
 
     def _confirm(self):
         also = [label.split()[-1] for _, label in self._chosen()]
@@ -1015,7 +973,7 @@ class UninstallScreen(ListScreen):
         y = draw_wrapped(surf, 'What this does', (rect.x, rect.y), rect.width, 36, TEXT, bold=True) + 12
         for head, body in (
                 ('Removes', 'The TV menu and its settings, auto-start (the Pi stops going straight into Moonlight), '
-                            'and the setup\'s services and boot changes.'),
+                            'USB sharing, and the setup\'s services and boot changes.'),
                 ('Keeps', 'Your Moonlight settings and pairing, and backups of the files the setup changed.'),
                 ('Afterwards', 'The Pi restarts the way it started before the setup: on Raspberry Pi OS Lite, a '
                                'text login prompt.')):
@@ -1025,7 +983,9 @@ class UninstallScreen(ListScreen):
         if it and it.desc:
             pygame.draw.line(surf, PANEL_HI, (rect.x, y), (rect.right, y), 2)
             y += 18
-            draw_wrapped(surf, it.desc, (rect.x, y), rect.width, 28, TEXT, line_gap=5)
+            y = draw_wrapped(surf, it.desc, (rect.x, y), rect.width, 28, TEXT, line_gap=5) + 10
+            if it.disabled and it.reason:
+                draw_wrapped(surf, it.reason, (rect.x, y), rect.width, 28, WARN, line_gap=5)
 
 
 class UninstalledScreen(Screen):
@@ -1090,6 +1050,8 @@ class QuickSetupPage(ChoiceScreen):
     def draw_more(self, surf, rect, y):
         if self.index == 0 and (self.app.autopair or not self.app.controllers):
             ui.pairing_box(surf, pygame.Rect(rect.x - 16, max(y + 10, rect.bottom - 300), rect.width + 32, 300 + 16))
+        elif self.flow.pages[self.index] == 'pcsetup':
+            usb_screens().draw_pc_command(surf, rect.x, y + 10, rect.width, self.app)
 
 
 # The on/off questions: page name -> (helper setting, status key).
@@ -1097,7 +1059,7 @@ QUICK_SWITCHES = {
     'quit': ('quit-on-shutdown', 'quit_on_shutdown'),
     'quiet': ('quiet-boot', 'quiet_boot'),
     'powersave': ('wifi-powersave', 'wifi_powersave'),
-    'usb': ('usb-handoff', 'usb_handoff'),
+    'usb': ('usb-sharing', 'usb_sharing'),
 }
 
 
@@ -1128,8 +1090,8 @@ class QuickSetup:
         self.pages += ['speakers', 'test', 'quit', 'quiet']
         if st.get('wifi') == '1':
             self.pages.append('powersave')
-        if st.get('virtualhere') == '1':
-            self.pages.append('usb')
+        if st.get('usbip') == '1':
+            self.pages += ['usb', 'pcsetup']
         if ts.get('installed') and ts.get('state') in ('NeedsLogin', 'NoState'):
             self.pages.append('tailscale')
         self.pages.append('done')
@@ -1142,6 +1104,8 @@ class QuickSetup:
             return bool(((self.app.net_status or {}).get('ethernet') or {}).get('connected'))
         if name == 'tailscale':
             return not self.app.online()     # signing in needs the internet
+        if name == 'pcsetup':
+            return self.status.get('usb_sharing') != '1'
         return False
 
     def show(self, i):
@@ -1207,13 +1171,20 @@ class QuickSetup:
                          ('on', 'Leave it on', 'Uses slightly less power.', '')],
                         current('wifi_powersave', '0'))
         if name == 'usb':
-            return page('When should VirtualHere send USB devices to your PC?',
-                        'VirtualHere sends USB devices plugged into the Pi, like a wired controller, to your PC as '
-                        'if they were plugged into it.',
-                        [('on', 'Only while streaming', "Between streams they stay on the Pi, so a controller works "
-                          "here and in Moonlight. While you're streaming, they're on your PC.", 'Recommended'),
-                         ('off', 'All the time', 'They stay on your PC, even between streams.', '')],
-                        current('usb_handoff'))
+            return page('Send USB devices to your PC while you stream?',
+                        'USB devices plugged into the Pi, like a wired controller, can go to your PC during a '
+                        'stream, as if they were plugged into it. Your PC needs setting up for this too.',
+                        [('on', 'Yes, while I stream', "Controllers and headsets go to your PC during a stream, and "
+                          "come back to the Pi afterwards, so they work here and in Moonlight. Choose others in "
+                          "Settings > USB sharing.", 'Recommended'),
+                         ('off', 'No, keep them on the Pi', 'Controllers still work in games, through Moonlight.',
+                          '')],
+                        current('usb_sharing'))
+        if name == 'pcsetup':
+            return page('Set up your gaming PC',
+                        "On the PC, open PowerShell and run this command. It lets the PC receive this Pi's USB "
+                        "devices. It's also in Settings > USB sharing > Set up your PC.",
+                        [('next', 'Continue', '', '')])
         if name == 'tailscale':
             return page('Stream away from home?',
                         'Tailscale lets you stream from your PC when you take the Pi somewhere else. Sign the Pi in '
@@ -1268,6 +1239,8 @@ class QuickSetup:
                 play_speaker_test(app, self.speakers)
             else:
                 next_page()
+        elif name == 'pcsetup':
+            next_page()
         elif name == 'tailscale':
             if value == 'signin':
                 # Backing out of the sign-in returns here, to try again or choose Not now.
