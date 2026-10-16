@@ -462,10 +462,26 @@ function Install-Helper {
     Write-Ok 'The USB sharing helper starts hidden when you log in, and is running now'
 }
 
+# Gives back any devices attached from the Pi(s) right away (the Pi would take
+# them back by itself anyway, 30 seconds after the helper stops asking).
+function Disconnect-PiDevices {
+    if (-not (Test-Path -LiteralPath $UsbipExe)) { return }
+    $addresses = @(Read-UsbConfig | ForEach-Object { $_.address; $_.tailscale } | Where-Object { $_ })
+    $rc, $out = Invoke-Usbip @('port')
+    foreach ($m in [regex]::Matches($out, '(?s)Port (\d+):.*?usbip://(\[[^\]]+\]|[^:/\s]+):\d+/(\S+)')) {
+        $port, $addr, $id = $m.Groups[1].Value, $m.Groups[2].Value.Trim('[', ']'), $m.Groups[3].Value
+        if ($addresses -contains $addr) {
+            Invoke-Usbip @('detach', '-p', [string][int]$port) | Out-Null
+            Invoke-Usbip @('attach', '-r', $addr, '-b', $id, '--stop') | Out-Null
+        }
+    }
+}
+
 function Remove-UsbSharing {
     Write-Step 'Removing USB sharing from this PC'
     $installedHere = Test-Path -LiteralPath $InstalledMarker
     Stop-Helper
+    Disconnect-PiDevices
     Remove-Item -LiteralPath $StartupLink -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $AppDir) { Remove-Item -LiteralPath $AppDir -Recurse -Force }
     Write-Ok 'Removed the USB sharing helper'
