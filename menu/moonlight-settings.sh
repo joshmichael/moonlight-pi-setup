@@ -492,7 +492,8 @@ usb_sharing_on() {
   command -v usbipd > /dev/null || die "USB/IP isn't installed (the usbip package). Run the setup script again."
   command -v nft > /dev/null || die "nftables isn't installed (sudo apt install nftables)."
   [[ -f ${MENU_DIR}/usb_sharing.py ]] || die "USB sharing isn't installed. Run the setup script again."
-  printf '%s\n%s\n' "# Installed by moonlight-pi-setup: USB sharing" "usbip-host" > "$USB_MODULES"
+  # usbmon: watching controllers on the PC for Moonlight's shortcut (usb_combo.py).
+  printf '%s\n' "# Installed by moonlight-pi-setup: USB sharing" usbip-host usbmon > "$USB_MODULES"
   modprobe usbip-host || die "Couldn't load the usbip-host driver."
   cat > "$USB_SERVICE" <<EOF
 # Installed by moonlight-pi-setup.

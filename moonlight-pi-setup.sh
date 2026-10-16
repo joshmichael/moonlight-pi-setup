@@ -49,7 +49,7 @@ LIB_DIR="/usr/local/lib/moonlight-pi-setup"
 MENU_DIR="${LIB_DIR}/menu"
 MENU_BIN="/usr/local/bin/moonlight-menu"
 MENU_FILES=(moonlight_menu.py ui.py network.py bluetooth.py wifi_setup.py settings.py settings_screens.py
-            usb_sharing.py usb_screens.py moonlight-settings.sh)
+            usb_sharing.py usb_combo.py usb_screens.py moonlight-settings.sh)
 MENU_PACKAGES=(python3-pygame python3-dbus python3-gi python3-qrcode nftables)
 SETTINGS_HELPER="${LIB_DIR}/moonlight-settings"
 SUDOERS_FILE="/etc/sudoers.d/moonlight-pi-setup"
@@ -858,9 +858,9 @@ setup_usb_sharing() {
   helper usb-sharing "$(on_off "$OPT_USB_SHARING")"
   if (( OPT_USB_SHARING )); then
     info "Once your PC is set up, controllers and headsets plugged into the Pi go to it while"
-    info "you stream (choose which on the TV, in Settings > USB sharing). The controller is"
-    info "then on the PC, so Moonlight's controller shortcut can't end the stream: quit the"
-    info "game on the PC, or press Ctrl+Alt+Shift+Q on a keyboard plugged into the Pi."
+    info "you stream (choose which on the TV, in Settings > USB sharing). Moonlight's"
+    info "controller shortcut (Select+Start+L1+R1) still ends the stream with PlayStation and"
+    info "Xbox controllers."
   fi
 }
 

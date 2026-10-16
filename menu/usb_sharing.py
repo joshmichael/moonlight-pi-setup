@@ -12,6 +12,9 @@ helper that the PC setup installs asks the Pi for its devices every 2 seconds,
 and the firewall remembers which addresses asked in the last 30 seconds. If the
 PC isn't ready, the devices stay on the Pi and work through Moonlight as usual.
 
+Moonlight's controller shortcut for ending a stream keeps working for
+controllers on the PC: see usb_combo.py.
+
 Installed by moonlight-pi-setup.
 """
 import glob
@@ -25,6 +28,8 @@ import socket
 import subprocess
 import sys
 import time
+
+import usb_combo
 
 SYS_USB = '/sys/bus/usb/devices'
 UDEV_DATA = '/run/udev/data'
@@ -736,6 +741,10 @@ class Service:
         self.modes = None       # bus ID -> receive mode, as announced to the PC
         self.last = load_status().get('last')
         self.status = None
+        self.keyboard = None    # Moonlight's controller shortcut (usb_combo.py)
+        self.shortcut = None
+        self.pad_types = {}     # (address, devnum) -> which controller it is, or None
+        self.watched = {}
 
     # -- usbipd -------------------------------------------------------------
     def keep_usbipd(self):
@@ -773,6 +782,44 @@ class Service:
     def end_stream(self, why):
         log('Stream ended (%s): giving USB devices back to the Pi' % why)
         self.streaming, self.pc, self.pending = False, None, None
+
+    # -- Moonlight's controller shortcut --------------------------------------
+    def start_shortcut(self):
+        try:
+            self.keyboard = usb_combo.Keyboard()
+        except OSError as e:
+            log("Moonlight's controller shortcut won't work for controllers on the PC: %s" % e)
+            return
+        self.shortcut = usb_combo.Watcher(self.shortcut_pressed, log)
+        self.shortcut.start()
+
+    def shortcut_pressed(self, address):
+        """Called from the watcher's thread."""
+        log('%s held Select+Start+L1+R1: ending the stream' % address)
+        try:
+            self.keyboard.end_stream()
+        except OSError as e:
+            log("Couldn't end the stream: %s" % e)
+
+    def watch_pads(self, devs, shared):
+        """During a stream, watches the controllers on the PC for the shortcut."""
+        plugged = {(d['address'], d['devnum']) for d in devs}
+        self.pad_types = {k: v for k, v in self.pad_types.items() if k in plugged}
+        pads = {}
+        for d in devs:
+            if not (self.streaming and d['address'] in shared and d['devnum'].isdigit()):
+                continue
+            key = (d['address'], d['devnum'])
+            if key not in self.pad_types:
+                self.pad_types[key] = usb_combo.pad_type(d['address'])
+            if self.pad_types[key]:
+                pads[(int(d['address'].split('-')[0]), int(d['devnum']))] = (d['address'], self.pad_types[key])
+        if pads != self.watched:
+            self.watched = pads
+            self.shortcut.watch(pads)
+            if pads:
+                log("Watching for Moonlight's controller shortcut on %s" % ', '.join(
+                    '%s (%s)' % (a, usb_combo.PADS[t][0]) for a, t in sorted(pads.values())))
 
     # -- sharing ------------------------------------------------------------
     def remember(self, dev):
@@ -848,6 +895,8 @@ class Service:
                 self.last = dict(last, time=int(time.time()))
         self.save_seen()
         shared = shared_addresses()
+        if self.shortcut:
+            self.watch_pads(devs, shared)
         ids = sorted([a, n, i] for (a, n), i in self.idents.items() if a in shared and i)
         status = {'streaming': self.streaming, 'pc': pc, 'pc_ready': pc_ready,
                   'ready': sorted(ready), 'shared': sorted(shared), 'ids': ids, 'last': self.last}
@@ -859,12 +908,14 @@ class Service:
         signal.signal(signal.SIGTERM, lambda *a: setattr(self, 'stop', True))
         signal.signal(signal.SIGINT, lambda *a: setattr(self, 'stop', True))
         run(['modprobe', 'usbip-host'])
+        run(['modprobe', 'usbmon'])
         ok, err = firewall_create()
         if not ok:
             log("Couldn't set up the firewall, so nothing will be shared: %s" % err)
             return 1
         self.streaming, self.pc = self.watcher.initial()
         log('Watching Moonlight%s' % (' (a stream is running)' if self.streaming else ''))
+        self.start_shortcut()
         try:
             while not self.stop:
                 try:
@@ -873,6 +924,10 @@ class Service:
                     log('Error: %s' % e)
                 time.sleep(1)
         finally:
+            if self.shortcut:
+                self.shortcut.close()
+            if self.keyboard:
+                self.keyboard.close()
             for a in sorted(shared_addresses()):
                 run(['usbip', 'unbind', '-b', a])
             if self.usbipd and self.usbipd.poll() is None:
