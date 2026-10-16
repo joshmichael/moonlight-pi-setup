@@ -77,13 +77,14 @@ function Test-Signature([string]$Path, [string]$Signer) {
     return ($sig.Status -eq 'Valid' -and $sig.SignerCertificate.Subject -like "CN=$Signer,*")
 }
 
-# Runs usbip.exe and returns what it printed. (Windows PowerShell turns a
+# Runs usbip.exe: (exit code, what it printed). (Windows PowerShell turns a
 # program's error output into errors, which would stop this script.)
 function Invoke-Usbip([string[]]$Arguments) {
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        return ((& $UsbipExe @Arguments 2>&1 | ForEach-Object { "$_" }) -join "`n")
+        $out = (& $UsbipExe @Arguments 2>&1 | ForEach-Object { "$_" }) -join "`n"
+        return $LASTEXITCODE, $out
     } finally {
         $ErrorActionPreference = $old
     }
@@ -189,22 +190,83 @@ function Test-UsbipPort([string]$Address, [int]$TimeoutMs = 800) {
 }
 
 # Whether a USB/IP server answers at this address (the Pi's USB sharing).
+# Between streams it shares nothing, and usbip.exe then prints nothing at all.
 function Test-UsbipServer([string]$Address) {
     if (-not (Test-UsbipPort $Address)) { return $false }
-    return ((Invoke-Usbip @('list', '-r', $Address)) -match 'Exportable USB devices|no exportable devices')
+    $rc, $out = Invoke-Usbip @('list', '-r', $Address)
+    return ($rc -eq 0)
 }
 
-# The home network's addresses to look through: this PC's own network, but not
-# Tailscale or virtual networks (WSL, Hyper-V). At most the 254 addresses
-# around this PC's own one.
+# The home network's addresses to look through: the networks this PC reaches
+# the internet through (so not virtual networks like VMware's, VirtualBox's or
+# WSL's, nor Tailscale). At most the 254 addresses around this PC's own one.
 function Get-LocalSubnets {
-    Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object { $_.PrefixOrigin -in 'Dhcp', 'Manual' -and $_.IPAddress -notlike '169.254.*' -and
-                       $_.InterfaceAlias -notmatch 'Tailscale|vEthernet|Loopback|Bluetooth' } |
+    Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' -and
+                       $_.InterfaceAlias -notmatch 'Tailscale' } |
+        ForEach-Object { $_.IPv4Address } | Where-Object { $_.IPAddress -notlike '169.254.*' } |
         ForEach-Object { ($_.IPAddress -split '\.')[0..2] -join '.' } | Sort-Object -Unique
 }
 
+# Reads a name from a DNS message: its labels, following compression pointers.
+function Read-DnsName([byte[]]$Data, [int]$Index) {
+    $labels = @()
+    for ($guard = 0; $guard -lt 64 -and $Index -lt $Data.Length; $guard++) {
+        $len = $Data[$Index]
+        if ($len -eq 0) { break }
+        if ($len -ge 192) { $Index = (($len -band 63) * 256) + $Data[$Index + 1]; continue }
+        $labels += [Text.Encoding]::ASCII.GetString($Data, $Index + 1, $len)
+        $Index += $len + 1
+    }
+    return , $labels
+}
+
+function Skip-DnsName([byte[]]$Data, [int]$Index) {
+    while ($Index -lt $Data.Length -and $Data[$Index] -ne 0) {
+        if ($Data[$Index] -ge 192) { return $Index + 2 }
+        $Index += $Data[$Index] + 1
+    }
+    return $Index + 1
+}
+
+# The Pi's own name (like moonlight-pi), asked from the Pi itself: Raspberry Pi
+# OS answers name questions sent straight to it (mDNS), when routers often
+# don't know the name.
+function Get-MdnsName([string]$Address) {
+    $parts = $Address.Split('.')
+    if ($parts.Count -ne 4) { return $null }
+    [array]::Reverse($parts)
+    $query = New-Object System.Collections.Generic.List[byte]
+    $query.AddRange([byte[]](0x4d, 0x50, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+    foreach ($label in @($parts) + 'in-addr', 'arpa') {
+        $query.Add([byte]$label.Length)
+        $query.AddRange([Text.Encoding]::ASCII.GetBytes($label))
+    }
+    $query.AddRange([byte[]](0, 0, 12, 0, 1))         # PTR record, internet class
+    $udp = New-Object System.Net.Sockets.UdpClient
+    try {
+        $udp.Client.ReceiveTimeout = 1000
+        [void]$udp.Send($query.ToArray(), $query.Count, $Address, 5353)
+        $from = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+        $r = $udp.Receive([ref]$from)
+        $questions = $r[4] * 256 + $r[5]
+        if ($r[6] * 256 + $r[7] -lt 1) { return $null }
+        $i = 12
+        for ($q = 0; $q -lt $questions; $q++) { $i = (Skip-DnsName $r $i) + 4 }
+        $i = Skip-DnsName $r $i
+        if ($r[$i] * 256 + $r[$i + 1] -ne 12) { return $null }
+        $labels = Read-DnsName $r ($i + 10)
+        if ($labels.Count -gt 0) { return $labels[0] }
+    } catch {
+    } finally {
+        $udp.Close()
+    }
+    return $null
+}
+
 function Get-PiName([string]$Address, [string]$Mac) {
+    $name = Get-MdnsName $Address
+    if ($name) { return $name }
     try {
         $task = [System.Net.Dns]::GetHostEntryAsync($Address)
         if ($task.Wait(1500) -and $task.Result.HostName -and $task.Result.HostName -ne $Address) {
@@ -296,7 +358,12 @@ function Read-PiAddress {
 function Select-Pis {
     $known = @(Read-UsbConfig | Where-Object { Test-UsbipServer $_.address })
     if ($known.Count -gt 0) {
-        foreach ($pi in $known) { Write-Ok "Using $($pi.name) ($($pi.address))" }
+        foreach ($pi in $known) {
+            $mac = Get-Mac $pi.address
+            if ($mac) { $pi | Add-Member -NotePropertyName mac -NotePropertyValue $mac -Force }
+            $pi | Add-Member -NotePropertyName name -NotePropertyValue (Get-PiName $pi.address $pi.mac) -Force
+            Write-Ok "Using $($pi.name) ($($pi.address))"
+        }
         return $known
     }
     $found = @(Find-Pis)

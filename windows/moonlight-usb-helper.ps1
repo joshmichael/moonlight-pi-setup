@@ -79,11 +79,13 @@ function Invoke-Usbip([string[]]$Arguments) {
     return $LASTEXITCODE, $out
 }
 
-# The bus IDs of the devices the Pi shares now, or $null if it didn't answer.
+# The bus IDs of the devices the Pi shares now (none between streams, when
+# usbip.exe prints nothing), or $null if it didn't answer.
 function Get-SharedDevices([string]$Address) {
     $rc, $out = Invoke-Usbip @('list', '-r', $Address)
-    if ($rc -ne 0 -and $out -notmatch 'no exportable devices') { return $null }
-    return @([regex]::Matches($out, '(?m)^\s+(\d+-[\d.]+)\s+:') | ForEach-Object { $_.Groups[1].Value })
+    if ($rc -ne 0) { return $null }
+    # The comma keeps an empty list a list: PowerShell would return $null instead.
+    return , @([regex]::Matches($out, '(?m)^\s+(\d+-[\d.]+)\s+:') | ForEach-Object { $_.Groups[1].Value })
 }
 
 # "address/busid" of each device attached from a USB/IP server.
@@ -119,9 +121,12 @@ function Find-TailscaleAddress($Pi) {
 # Finds a Pi that has moved to another address: by its name, then by its
 # network card's hardware address on the home network.
 function Find-PiAgain($Pi) {
-    if ($Pi.name) {
+    # By name: the Pi answers for name.local itself (mDNS).
+    $names = @("$($Pi.name)" | Where-Object { $_ -match '^[A-Za-z0-9][A-Za-z0-9.-]*$' })
+    if ($names -and $names[0] -notmatch '\.') { $names = @("$($names[0]).local") + $names }
+    foreach ($n in $names) {
         try {
-            foreach ($a in [System.Net.Dns]::GetHostAddresses("$($Pi.name)")) {
+            foreach ($a in [System.Net.Dns]::GetHostAddresses($n)) {
                 if ($a.AddressFamily -eq 'InterNetwork' -and (Test-UsbipPort $a.IPAddressToString)) {
                     return $a.IPAddressToString
                 }
@@ -129,11 +134,13 @@ function Find-PiAgain($Pi) {
         } catch {}
     }
     if (-not $Pi.mac) { return $null }
-    $subnets = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object { $_.PrefixOrigin -in 'Dhcp', 'Manual' -and $_.IPAddress -notlike '169.254.*' -and
-                       $_.InterfaceAlias -notmatch 'Tailscale|vEthernet|Loopback|Bluetooth' }
-    foreach ($s in $subnets) {
-        $base = ($s.IPAddress -split '\.')[0..2] -join '.'
+    # The networks this PC reaches the internet through (not virtual ones, nor Tailscale).
+    $subnets = Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' -and
+                       $_.InterfaceAlias -notmatch 'Tailscale' } |
+        ForEach-Object { $_.IPv4Address } | Where-Object { $_.IPAddress -notlike '169.254.*' } |
+        ForEach-Object { ($_.IPAddress -split '\.')[0..2] -join '.' } | Sort-Object -Unique
+    foreach ($base in $subnets) {
         $clients = foreach ($i in 1..254) {
             $c = New-Object System.Net.Sockets.TcpClient
             [pscustomobject]@{ Ip = "$base.$i"; Client = $c; Task = $c.ConnectAsync("$base.$i", $Port) }
