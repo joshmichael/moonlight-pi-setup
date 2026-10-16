@@ -136,6 +136,7 @@ USB sharing sends USB devices plugged into the Pi, like a wired controller, to y
 - **Ports** lists the Pi's USB ports and the ports of any hub plugged into it. A **PC port** sends anything plugged into it to the PC, including everything on a hub plugged into it, unless a device is set to Never. Plug something in to see which port it is.
 - A device's own setting comes first, then PC ports, then its type. Devices built into the board, like the Pi 500's keyboard, are never shared.
 - **Share USB devices with your PC** turns it all off, for example to use Moonlight's controller shortcut for a while.
+- **Low-latency mode** (off by default) chooses which devices the PC receives in usbip-win2's low-latency mode: none, controllers, keyboards and mice, or everything. It hands each small packet over as it arrives, which suits controllers, at the cost of an extra copy, which can slow devices that move a lot of data. The Pi announces each device's mode on the home network (mDNS) and the PC's helper uses it when it attaches the device, so a change applies from the next stream.
 
 Notes:
 

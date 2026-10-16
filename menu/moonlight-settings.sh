@@ -16,6 +16,8 @@
 #   quit-on-shutdown on|off      end the stream on the PC when the Pi shuts down
 #   usb-sharing on|off           send USB devices plugged into the Pi to the PC while streaming
 #   usb-tailscale on|off         let USB sharing work over Tailscale (off: home network only)
+#   usb-latency off|input|all    which devices the PC receives in usbip-win2's low-latency mode
+#                                (input: controllers, keyboards and mice)
 #   usb-device KEY always|never|auto
 #                                what a device does (KEY: vendor:product, plus /its-own-ID
 #                                if it has one); auto goes by its type
@@ -52,6 +54,7 @@ USB_SERVICE_NAME="moonlight-usb-sharing.service"
 USB_SERVICE="/etc/systemd/system/${USB_SERVICE_NAME}"
 USB_MODULES="/etc/modules-load.d/moonlight-usb-sharing.conf"
 USB_CONFIG="${ROOT_STATE_DIR}/usb-sharing.conf"
+USB_AVAHI_SERVICE="/etc/avahi/services/moonlight-usb-sharing.service"
 COUNTRIES="/usr/share/zoneinfo/iso3166.tab"
 
 MARK_BEGIN="# >>> moonlight-pi-setup >>>"
@@ -199,6 +202,9 @@ cmd_status() {
   say "usbip=$(flag command -v usbipd)"
   say "usb_sharing=$(flag service_enabled "$USB_SERVICE_NAME")"
   say "usb_tailscale=$(flag recorded "$USB_CONFIG" tailscale)"
+  local latency
+  latency=$(kv_get "$USB_CONFIG" latency)
+  say "usb_latency=${latency:-off}"
   say "quiet_boot=$(flag grep -qsF "$MARK_BEGIN" "$CONFIG_TXT")"
   say "wifi=$(flag compgen -G '/sys/class/net/*/wireless')"
   say "wifi_powersave=$(flag test ! -f "$NM_WIFI_CONF")"
@@ -516,7 +522,7 @@ usb_sharing_off() {
     rm -f "$USB_SERVICE"
     systemctl daemon-reload
   fi
-  rm -f "$USB_MODULES"
+  rm -f "$USB_MODULES" "$USB_AVAHI_SERVICE"
   say "USB devices plugged into the Pi stay on the Pi"
 }
 
@@ -528,6 +534,16 @@ usb_tailscale_on() {
 usb_tailscale_off() {
   usb_conf_set tailscale
   say "USB sharing only works on your home network (not over Tailscale)"
+}
+
+# Which devices the PC receives in usbip-win2's low-latency mode. The service
+# announces each device's mode on the home network, for the PC's helper.
+cmd_usb_latency() {
+  case "${1:-}" in
+    off|input|all) usb_conf_set latency "$1" ;;
+    *) die "Use: usb-latency off|input|all" ;;
+  esac
+  say "Low-latency mode: $1"
 }
 
 USB_DEVICE_USAGE="Use: usb-device VENDOR:PRODUCT[/ID] always|never|auto (ID: the device's own, if it has one)"
@@ -795,7 +811,7 @@ main() {
       load_user
       "${cmd//-/_}_${value}"
       ;;
-    usb-device|usb-port) require_root; lock; "cmd_${cmd//-/_}" "$value" "$extra" ;;
+    usb-device|usb-port|usb-latency) require_root; lock; "cmd_${cmd//-/_}" "$value" "$extra" ;;
     wifi-country) require_root; lock; cmd_wifi_country "$value" ;;
     tailscale) require_root; cmd_tailscale "$value" ;;
     updates) require_root; lock; cmd_updates "$value" ;;

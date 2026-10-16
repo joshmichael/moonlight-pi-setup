@@ -95,6 +95,85 @@ function Get-AttachedDevices {
         ForEach-Object { '{0}/{1}' -f $_.Groups[1].Value.Trim('[', ']'), $_.Groups[2].Value })
 }
 
+# ---------------------------------------------------------------------------
+# Low-latency mode: the Pi announces (mDNS) which mode each device it shares
+# should be received in, as set on the TV. Asked straight from the Pi.
+# ---------------------------------------------------------------------------
+function Read-DnsName([byte[]]$Data, [int]$Index) {
+    $labels = @()
+    for ($guard = 0; $guard -lt 64 -and $Index -lt $Data.Length; $guard++) {
+        $len = $Data[$Index]
+        if ($len -eq 0) { break }
+        if ($len -ge 192) { $Index = (($len -band 63) * 256) + $Data[$Index + 1]; continue }
+        $labels += [Text.Encoding]::UTF8.GetString($Data, $Index + 1, $len)
+        $Index += $len + 1
+    }
+    return , $labels
+}
+
+function Skip-DnsName([byte[]]$Data, [int]$Index) {
+    while ($Index -lt $Data.Length -and $Data[$Index] -ne 0) {
+        if ($Data[$Index] -ge 192) { return $Index + 2 }
+        $Index += $Data[$Index] + 1
+    }
+    return $Index + 1
+}
+
+# Asks the Pi itself (mDNS on port 5353) for records of one name and type:
+# the reply's bytes, and where each record's data is in them.
+function Invoke-MdnsQuery([string]$Address, [string[]]$Labels, [int]$Type) {
+    $query = New-Object System.Collections.Generic.List[byte]
+    $query.AddRange([byte[]](0x4d, 0x55, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+    foreach ($label in $Labels) {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($label)
+        $query.Add([byte]$bytes.Length)
+        $query.AddRange($bytes)
+    }
+    $query.AddRange([byte[]](0, 0, $Type, 0, 1))
+    $udp = New-Object System.Net.Sockets.UdpClient
+    try {
+        $udp.Client.ReceiveTimeout = 800
+        [void]$udp.Send($query.ToArray(), $query.Count, $Address, 5353)
+        $from = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+        $r = $udp.Receive([ref]$from)
+    } catch {
+        return $null
+    } finally {
+        $udp.Close()
+    }
+    $i = 12
+    for ($q = 0; $q -lt $r[4] * 256 + $r[5]; $q++) { $i = (Skip-DnsName $r $i) + 4 }
+    $count = ($r[6] * 256 + $r[7]) + ($r[8] * 256 + $r[9]) + ($r[10] * 256 + $r[11])
+    $records = @()
+    for ($n = 0; $n -lt $count -and $i + 10 -le $r.Length; $n++) {
+        $i = Skip-DnsName $r $i
+        $len = $r[$i + 8] * 256 + $r[$i + 9]
+        $records += [pscustomobject]@{ Type = $r[$i] * 256 + $r[$i + 1]; Start = $i + 10; Length = $len }
+        $i += 10 + $len
+    }
+    return [pscustomobject]@{ Data = $r; Records = $records }
+}
+
+# Bus ID -> 'low-latency' or 'zero-copy', as the Pi announces them (empty if
+# it doesn't answer, and then the standard mode is used).
+function Get-PiReceiveModes([string]$Address) {
+    $modes = @{}
+    $ptr = Invoke-MdnsQuery $Address @('_moonlight-usb', '_tcp', 'local') 12
+    $rec = if ($ptr) { $ptr.Records | Where-Object { $_.Type -eq 12 } | Select-Object -First 1 }
+    if (-not $rec) { return $modes }
+    $txt = Invoke-MdnsQuery $Address (Read-DnsName $ptr.Data $rec.Start) 16
+    if (-not $txt) { return $modes }
+    foreach ($t in $txt.Records | Where-Object { $_.Type -eq 16 }) {
+        $j, $end = $t.Start, ($t.Start + $t.Length)
+        while ($j -lt $end) {
+            $s = [Text.Encoding]::UTF8.GetString($txt.Data, $j + 1, $txt.Data[$j])
+            $j += $txt.Data[$j] + 1
+            if ($s -match '^(\d+-[\d.]+)=(zero-copy|low-latency)$') { $modes[$Matches[1]] = $Matches[2] }
+        }
+    }
+    return $modes
+}
+
 # The Pi's Tailscale address, from Tailscale on this PC: the peer that has the
 # Pi's home address among its endpoints, or the Pi's name.
 function Find-TailscaleAddress($Pi) {
@@ -213,10 +292,17 @@ while ($true) {
             $devices = Get-SharedDevices $addr
             if ($null -eq $devices) { continue }
             $answered = $addr
+            $modes = $null
             foreach ($id in $devices) {
                 if ($attached -contains "$addr/$id") { continue }
-                $rc, $out = Invoke-Usbip @('attach', '-r', $addr, '-b', $id, '--once')
-                Write-Log "Device $id from $($pi.name) ($addr): $($out.Trim())"
+                if ($null -eq $modes) {
+                    # Asked at the home address (the Pi doesn't announce over Tailscale).
+                    $modes = Get-PiReceiveModes $pi.address
+                    if ($modes.Count -eq 0 -and $addr -ne $pi.address) { $modes = Get-PiReceiveModes $addr }
+                }
+                $mode = if ($modes[$id]) { $modes[$id] } else { 'zero-copy' }
+                $rc, $out = Invoke-Usbip @('attach', '-r', $addr, '-b', $id, '--once', '--receive-mode', $mode)
+                Write-Log "Device $id from $($pi.name) ($addr, $mode): $($out.Trim())"
                 if ($rc -eq 0) { $mine["$addr/$id"] = $true }
             }
             break

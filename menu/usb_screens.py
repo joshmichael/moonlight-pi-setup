@@ -23,7 +23,17 @@ DESCRIPTIONS = {
                  "Tailscale. It adds input lag and stutter, and away from home controllers work better through "
                  "Moonlight.",
     'pc': 'The command to run on your gaming PC, so it can receive USB devices from the Pi.',
+    'latency': "How your PC receives a device's data. Low-latency mode hands each small packet over the moment "
+               "it arrives, which suits controllers. The difference is small: try it and see.",
 }
+
+LATENCY_OPTIONS = [
+    ('off', 'Off', "Every device uses usbip-win2's standard mode, which has had the most use.", ''),
+    ('input', 'Controllers, keyboards and mice', 'They use low-latency mode: they send small packets often, '
+     'which it hands over as they arrive. Other devices use the standard mode.', ''),
+    ('all', 'All devices', 'Every device uses low-latency mode. It copies data once more, so it can be slower '
+     'for devices that move a lot of data, like USB drives and cameras.', ''),
+]
 
 RULE_NAMES = {'always': 'Always', 'never': 'Never', None: 'Automatic'}
 
@@ -155,6 +165,9 @@ class UsbSharingScreen(SnapshotMixin, SettingsListScreen):
                  disabled=not ts_on and (not on or not ts_running),
                  reason='Turn on USB sharing first.' if not on else
                         'Sign in to Tailscale first, in Settings > Tailscale.'),
+            Item('Low-latency mode', lambda: app.push(LatencyScreen(app, st.get('usb_latency') or 'off', self.load)),
+                 key='latency', detail=usb_sharing.LATENCY.get(st.get('usb_latency'), 'Off'),
+                 desc=DESCRIPTIONS['latency']),
             Item('Set up your PC', lambda: app.push(PcSetupScreen(app)), key='pc', desc=DESCRIPTIONS['pc']),
         ])
 
@@ -197,6 +210,34 @@ class UsbSharingScreen(SnapshotMixin, SettingsListScreen):
         if last:
             lines.append(last)
         return lines
+
+
+class LatencyScreen(ChoiceScreen):
+    """Which devices the PC receives in usbip-win2's low-latency mode. The Pi
+    tells the PC's helper, which uses it the next time it attaches a device."""
+
+    def __init__(self, app, current, on_changed=None):
+        super().__init__(app, 'Low-latency mode', 'Which devices should use low-latency mode?',
+                         DESCRIPTIONS['latency'] + ' A change applies from the next stream.',
+                         LATENCY_OPTIONS, current, self._pick)
+        self.on_changed = on_changed
+
+    def _pick(self, value):
+        app = self.app
+        if value == self.current:
+            app.pop()
+            return
+
+        def done(res, err):
+            if err:
+                app.message("Couldn't change that", str(err))
+                return
+            self.current = value
+            self.refresh()
+            app.show_toast('Low-latency mode: %s' % usb_sharing.LATENCY[value], GOOD)
+            if self.on_changed:
+                self.on_changed()
+        app.run_task(lambda: settings.change('usb-latency', value), done, busy='Saving…')
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +350,12 @@ class UsbDevicesScreen(SnapshotMixin, ListScreen):
             draw_text(surf, value, (rect.x, y + 32), 30, TEXT, max_width=rect.width)
             y += 84
         color, text = device_result(d, self.sharing_on)
-        draw_wrapped(surf, text, (rect.x, y + 6), rect.width, 29, color, line_gap=6)
+        y = draw_wrapped(surf, text, (rect.x, y + 6), rect.width, 29, color, line_gap=6)
+        if color == GOOD:
+            mode = usb_sharing.receive_mode(d, self.snap['config'])
+            draw_wrapped(surf, 'On your PC it uses %s.' % ('low-latency mode' if mode == 'low-latency' else
+                                                           'the standard mode'),
+                         (rect.x, y + 8), rect.width, 27, DIM, line_gap=5)
 
 
 class UsbDeviceScreen(ChoiceScreen):

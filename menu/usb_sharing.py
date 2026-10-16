@@ -32,6 +32,9 @@ STATE_DIR = '/var/lib/moonlight-pi-setup'
 CONFIG = STATE_DIR + '/usb-sharing.conf'       # written by the settings helper
 SEEN = STATE_DIR + '/usb-seen.json'            # devices the Pi has seen, for the menu
 STATUS = '/run/moonlight-usb-sharing/status.json'
+# Announced on the home network (mDNS), for the PC's helper: which mode the PC
+# receives each device in.
+AVAHI_SERVICE = '/etc/avahi/services/moonlight-usb-sharing.service'
 MOONLIGHT_LOG = '/tmp/moonlight.log'
 MODEL_FILE = '/proc/device-tree/model'
 USB_IDS = ('/usr/share/misc/usb.ids', '/usr/share/hwdata/usb.ids', '/var/lib/usbutils/usb.ids')
@@ -53,6 +56,17 @@ KINDS = {
     'camera': ('Camera', "it's a camera", False),
     'other': ('Other', "it isn't a controller or a headset", False),
 }
+
+# Low-latency mode: how the PC's usbip-win2 receives a device's data. It hands
+# small, frequent packets (like a controller's) over as they arrive, at the
+# cost of an extra copy, so it suits input devices more than heavy ones.
+LATENCY = {
+    'off': 'Off',
+    'input': 'Controllers, keyboards and mice',
+    'all': 'All devices',
+}
+DEFAULT_LATENCY = 'off'
+INPUT_KINDS = ('controller', 'keyboard', 'mouse')
 
 PORT_KEY_RE = re.compile(r'^[0-9]{1,3}-[0-9]{1,3}(\.[0-9]{1,3}){0,6}$')
 # A device's settings are kept under its model (vendor:product), plus its own ID
@@ -76,8 +90,9 @@ def board_model():
 # Settings (changed only by the settings helper, as root)
 # ---------------------------------------------------------------------------
 def load_config(path=CONFIG):
-    """{'tailscale': bool, 'devices': {device key: 'always'|'never'}, 'ports': set of port keys}."""
-    cfg = {'tailscale': False, 'devices': {}, 'ports': set()}
+    """{'tailscale': bool, 'latency': a LATENCY key, 'devices': {device key: 'always'|'never'},
+    'ports': set of port keys}."""
+    cfg = {'tailscale': False, 'latency': DEFAULT_LATENCY, 'devices': {}, 'ports': set()}
     try:
         with open(path) as f:
             lines = f.read().splitlines()
@@ -89,6 +104,8 @@ def load_config(path=CONFIG):
             continue
         if key == 'tailscale':
             cfg['tailscale'] = value == '1'
+        elif key == 'latency' and value in LATENCY:
+            cfg['latency'] = value
         elif key.startswith('device.') and DEVICE_KEY_RE.match(key[7:]) and value in ('always', 'never'):
             cfg['devices'][key[7:]] = value
         elif key.startswith('port.') and PORT_KEY_RE.match(key[5:]) and value == 'on':
@@ -413,6 +430,37 @@ def kind_label(kind):
     return KINDS.get(kind, KINDS['other'])[0]
 
 
+def receive_mode(dev, cfg):
+    """How the PC receives this device's data: 'low-latency' or 'zero-copy'
+    (usbip-win2's standard mode)."""
+    if cfg['latency'] == 'all' or (cfg['latency'] == 'input' and dev['kind'] in INPUT_KINDS):
+        return 'low-latency'
+    return 'zero-copy'
+
+
+def announce(modes):
+    """Tells the PC's helper which mode to receive each device in, by bus ID,
+    as an mDNS service (avahi publishes it, and picks up changes by itself).
+    None stops announcing."""
+    if modes is None:
+        try:
+            os.remove(AVAHI_SERVICE)
+        except OSError:
+            pass
+        return
+    if not os.path.isdir(os.path.dirname(AVAHI_SERVICE)):
+        return      # no avahi: the PC uses its standard mode
+    txt = ['v=1'] + ['%s=%s' % kv for kv in sorted(modes.items())]
+    xml = ('<?xml version="1.0" standalone="no"?>\n'
+           '<!DOCTYPE service-group SYSTEM "avahi-service.dtd">\n'
+           '<!-- Installed by moonlight-pi-setup: USB sharing, for the PC\'s helper. -->\n'
+           '<service-group>\n  <name replace-wildcards="yes">%h</name>\n  <service>\n'
+           '    <type>_moonlight-usb._tcp</type>\n    <port>' + str(USBIP_PORT) + '</port>\n' +
+           ''.join('    <txt-record>%s</txt-record>\n' % t for t in txt) +
+           '  </service>\n</service-group>\n')
+    write_text(AVAHI_SERVICE, xml)
+
+
 # ---------------------------------------------------------------------------
 # For the menu
 # ---------------------------------------------------------------------------
@@ -657,15 +705,19 @@ def shared_addresses():
         if os.path.isdir('/sys/bus/usb/drivers/usbip-host') else set()
 
 
-def write_json(path, data):
+def write_text(path, text):
     tmp = path + '.tmp'
     try:
         with open(tmp, 'w') as f:
-            json.dump(data, f)
+            f.write(text)
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except OSError as e:
         log('Could not write %s: %s' % (path, e))
+
+
+def write_json(path, data):
+    write_text(path, json.dumps(data))
 
 
 class Service:
@@ -681,6 +733,7 @@ class Service:
         self.seen = load_seen()
         self.seen_changed = False
         self.idents = {}        # (address, devnum) -> a device's own ID, read while it's on the Pi
+        self.modes = None       # bus ID -> receive mode, as announced to the PC
         self.last = load_status().get('last')
         self.status = None
 
@@ -757,12 +810,13 @@ class Service:
                 self.rules = rules
             else:
                 log("Couldn't update the firewall: %s" % err)
-        want, names = set(), []
+        want, names, modes = set(), [], {}
         devs = devices(self.seen, self.idents)
         self.idents = {k: v for k, v in self.idents.items() if k in {(d['address'], d['devnum']) for d in devs}}
         for d in devs:
             if d['hub'] or d['builtin']:
                 continue
+            modes[d['address']] = receive_mode(d, cfg)
             if not d['shared']:
                 self.idents[(d['address'], d['devnum'])] = d['ident']
                 self.remember(d)
@@ -772,13 +826,20 @@ class Service:
             if pc_ready and (unknown or decide(d, cfg)[0]):
                 want.add(d['address'])
                 names.append(d['name'])
+        # Announce each device's mode before sharing it: a device whose mode has
+        # only just been announced waits a second, so the PC's helper reads it.
+        fresh = set()
+        if modes != self.modes:
+            announce(modes)
+            fresh = {a for a, m in modes.items() if (self.modes or {}).get(a) != m}
+            self.modes = modes
         shared = shared_addresses()
         for a in sorted(shared - want):
             rc, out = run(['usbip', 'unbind', '-b', a])
             log('Gave %s back to the Pi%s' % (a, '' if rc == 0 else ': ' + out))
-        for a in sorted(want - shared):
+        for a in sorted(want - shared - fresh):
             rc, out = run(['usbip', 'bind', '-b', a])
-            log('Shared %s with %s%s' % (a, pc, '' if rc == 0 else ': ' + out))
+            log('Shared %s with %s (%s)%s' % (a, pc, modes.get(a, 'zero-copy'), '' if rc == 0 else ': ' + out))
         if self.streaming:
             # What happened in this stream, for the menu to show afterwards.
             last = {'pc': pc, 'ready': pc_ready, 'devices': sorted(set(names)),
@@ -821,6 +882,7 @@ class Service:
                 except subprocess.TimeoutExpired:
                     self.usbipd.kill()
             nft('delete table inet %s\n' % NFT_TABLE)
+            announce(None)
             try:
                 os.remove(STATUS)
             except OSError:
