@@ -226,12 +226,24 @@ def _name(path, vid, pid):
     return product
 
 
+def _event_dirs(path, address):
+    """The input event devices under a USB device's interfaces, including those
+    of devices behind a receiver (like a Logitech receiver's keyboard and mouse).
+    Symbolic links aren't followed, so this stays inside the device."""
+    for iface in glob.glob('%s/%s:*' % (path, address)):
+        top = iface.count(os.sep)
+        for root, dirs, files in os.walk(iface):
+            if root.count(os.sep) - top >= 6:
+                dirs[:] = []
+            if os.path.basename(root).startswith('event') and 'dev' in files and \
+                    os.path.basename(os.path.dirname(os.path.dirname(root))) == 'input':
+                yield root
+
+
 def _input_props(path, address):
     """The udev properties (ID_INPUT_*) of the input devices a USB device has."""
     props = set()
-    events = (glob.glob('%s/%s:*/input/input*/event*' % (path, address)) +
-              glob.glob('%s/%s:*/*/input/input*/event*' % (path, address)))
-    for ev in events:
+    for ev in _event_dirs(path, address):
         dev = _read(ev + '/dev')
         data = _read('%s/c%s' % (UDEV_DATA, dev)) if dev else ''
         if data:
