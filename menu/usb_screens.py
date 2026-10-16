@@ -219,6 +219,26 @@ def device_result(dev, sharing_on):
     return DIM, 'Stays on the Pi: %s.' % why
 
 
+def short_id(ident):
+    """The end of a device's ID, to tell two of the same device apart: '91:D6'."""
+    return (ident[-5:] if ':' in ident else ident[-6:]).upper() if ident else ''
+
+
+def item_names(devices, remembered):
+    """List labels, telling two devices with the same name apart: by port for
+    those plugged in, by the end of their ID for the others."""
+    counts = {}
+    for d in devices + remembered:
+        counts[d['name']] = counts.get(d['name'], 0) + 1
+    names = {}
+    for d in devices:
+        names['dev:' + d['address']] = d['name'] + (' (%s)' % d['label'] if counts[d['name']] > 1 else '')
+    for d in remembered:
+        names['seen:' + d['key']] = d['name'] + (' (ID %s)' % short_id(d['ident'])
+                                                 if counts[d['name']] > 1 and d['ident'] else '')
+    return names
+
+
 class UsbDevicesScreen(SnapshotMixin, ListScreen):
     title = 'USB devices'
 
@@ -236,20 +256,20 @@ class UsbDevicesScreen(SnapshotMixin, ListScreen):
             self.list.set_items([Item('Loading…', selectable=False, spinner=True)])
             return
         cfg = self.snap['config']
+        devs = [d for d in self.snap['devices'] if not d['hub']]
+        names = item_names(devs, self.snap['remembered'])
         items = []
-        for d in self.snap['devices']:
-            if d['hub']:
-                continue
+        for d in devs:
             detail, color = ('To your PC', GOOD) if d['goes'] and self.sharing_on else ('Stays on Pi', DIM)
-            items.append(Item(d['name'], lambda d=d: app.push(UsbDeviceScreen(app, d, cfg)),
+            items.append(Item(names['dev:' + d['address']], lambda d=d: app.push(UsbDeviceScreen(app, d, cfg)),
                               key='dev:' + d['address'], detail=detail, detail_color=color))
         if not items:
             items.append(Item('Nothing is plugged in', selectable=False, key='none'))
         if self.snap['remembered']:
             items.append(Item('Not plugged in now', selectable=False, color=FAINT, key='head'))
             for d in self.snap['remembered']:
-                items.append(Item(d['name'], lambda d=d: app.push(UsbDeviceScreen(app, d, cfg)),
-                                  key='seen:' + d['model'], detail=RULE_NAMES[d['rule']], detail_color=FAINT))
+                items.append(Item(names['seen:' + d['key']], lambda d=d: app.push(UsbDeviceScreen(app, d, cfg)),
+                                  key='seen:' + d['key'], detail=RULE_NAMES[d['rule']], detail_color=FAINT))
         self.list.set_items(items)
 
     def plugged_in(self, dev):
@@ -266,7 +286,7 @@ class UsbDevicesScreen(SnapshotMixin, ListScreen):
             if it.key == 'dev:' + d['address']:
                 return d
         for d in self.snap['remembered']:
-            if it.key == 'seen:' + d['model']:
+            if it.key == 'seen:' + d['key']:
                 return d
         return None
 
@@ -277,10 +297,14 @@ class UsbDevicesScreen(SnapshotMixin, ListScreen):
                          30, DIM)
             return
         y = draw_wrapped(surf, d['name'], (rect.x, rect.y), rect.width, 36, TEXT, bold=True) + 16
-        rule = (self.snap['config']['devices'].get(d['model']) if 'address' in d else d.get('rule'))
-        for label, value in (('Type', usb_sharing.kind_label(d['kind'])),
-                             ('Plugged into', d.get('label') or 'Not plugged in now'),
-                             ('Setting', RULE_NAMES[rule])):
+        rule = (self.snap['config']['devices'].get(d['key']) if 'address' in d else d.get('rule'))
+        rows = [('Type', usb_sharing.kind_label(d['kind'])),
+                ('Plugged into', d.get('label') or 'Not plugged in now'),
+                ('Setting', '%s (%s)' % (RULE_NAMES[rule], 'this one only' if d.get('ident') else
+                                         'every one of this model'))]
+        if d.get('ident'):
+            rows.insert(1, ('Its own ID ends in', short_id(d['ident'])))
+        for label, value in rows:
             draw_text(surf, label, (rect.x, y), 26, FAINT, bold=True)
             draw_text(surf, value, (rect.x, y + 32), 30, TEXT, max_width=rect.width)
             y += 84
@@ -294,12 +318,17 @@ class UsbDeviceScreen(ChoiceScreen):
     def __init__(self, app, dev, cfg):
         self.dev = dev
         self.ports = set(cfg['ports'])
-        rule = cfg['devices'].get(dev['model'])
+        rule = cfg['devices'].get(dev['key'])
         _, why, goes = usb_sharing.KINDS.get(dev['kind'], usb_sharing.KINDS['other'])
         auto = ('Goes to your PC: %s.' if goes else 'Stays on the Pi: %s.') % why
+        where = ('plugged into %s' % dev['label']) if dev.get('label') else 'not plugged in now'
+        if dev.get('ident'):
+            which = ('This is for this one only (its ID ends in %s), in any port: another of the same '
+                     'model can be set differently.' % short_id(dev['ident']))
+        else:
+            which = "This is for every one of this model: it has no ID of its own to tell them apart."
         super().__init__(app, dev['name'], 'Where should it go while you stream?',
-                         '%s, %s.' % (usb_sharing.kind_label(dev['kind']),
-                                      ('plugged into %s' % dev['label']) if dev.get('label') else 'not plugged in now'),
+                         '%s, %s. %s' % (usb_sharing.kind_label(dev['kind']), where, which),
                          [('auto', 'Automatic', auto + ' A PC port sends it to your PC too.', ''),
                           ('always', 'Always to your PC', 'In any port, whatever type of device it is.', ''),
                           ('never', 'Never to your PC', 'It stays on the Pi, even in a PC port.', '')],
@@ -327,7 +356,7 @@ class UsbDeviceScreen(ChoiceScreen):
             self.current = value
             self.refresh()
             app.show_toast('%s: %s' % (self.dev['name'], RULE_NAMES[None if value == 'auto' else value]), GOOD)
-        app.run_task(lambda: settings.usb_device(self.dev['model'], value), done, busy='Saving…')
+        app.run_task(lambda: settings.usb_device(self.dev['key'], value), done, busy='Saving…')
 
     def _port(self):
         app = self.app

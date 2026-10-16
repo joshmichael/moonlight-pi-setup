@@ -172,10 +172,11 @@ def change(name, value):
         return _run([name, value], root=True)
 
 
-def usb_device(model, rule):
-    """What a USB device (model: vendor:product) does: always, never or auto."""
+def usb_device(key, rule):
+    """What a USB device does: always, never or auto. key: vendor:product, plus
+    /its-own-ID if it has one (usb_sharing.device_key)."""
     with _lock:
-        return _run(['usb-device', model, rule], root=True)
+        return _run(['usb-device', key, rule], root=True)
 
 
 def usb_port(key, on):

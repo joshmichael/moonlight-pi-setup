@@ -132,7 +132,7 @@ USB sharing sends USB devices plugged into the Pi, like a wired controller, to y
 **Choosing what goes** (Settings → USB sharing):
 
 - By default, controllers (including wheels and joysticks) and headsets go to the PC. Keyboards, mice, storage and Bluetooth adapters stay on the Pi.
-- **Devices** lists everything plugged in, and devices the Pi has seen before. Set each one to **Always**, **Never** or **Automatic** (by its type), or choose **Send anything plugged into this port**.
+- **Devices** lists everything plugged in, and devices the Pi has seen before. Set each one to **Always**, **Never** or **Automatic** (by its type), or choose **Send anything plugged into this port**. A device with its own ID (a serial number, or a controller's Bluetooth address, like a DualSense's) is set on its own, in any port, so one DualSense can stay on the Pi while another goes to the PC. Devices without one are set per model.
 - **Ports** lists the Pi's USB ports and the ports of any hub plugged into it. A **PC port** sends anything plugged into it to the PC, including everything on a hub plugged into it, unless a device is set to Never. Plug something in to see which port it is.
 - A device's own setting comes first, then PC ports, then its type. Devices built into the board, like the Pi 500's keyboard, are never shared.
 - **Share USB devices with your PC** turns it all off, for example to use Moonlight's controller shortcut for a while.

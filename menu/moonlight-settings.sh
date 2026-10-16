@@ -16,8 +16,9 @@
 #   quit-on-shutdown on|off      end the stream on the PC when the Pi shuts down
 #   usb-sharing on|off           send USB devices plugged into the Pi to the PC while streaming
 #   usb-tailscale on|off         let USB sharing work over Tailscale (off: home network only)
-#   usb-device ID always|never|auto
-#                                what a device (ID: vendor:product) does; auto goes by its type
+#   usb-device KEY always|never|auto
+#                                what a device does (KEY: vendor:product, plus /its-own-ID
+#                                if it has one); auto goes by its type
 #   usb-port PORT on|off         send anything plugged into a port (PORT: e.g. 1-1, or 1-1.3 on a hub)
 #   quiet-boot on|off            hide boot messages (after a restart)
 #   wifi-powersave on|off        Wi-Fi power saving
@@ -529,12 +530,15 @@ usb_tailscale_off() {
   say "USB sharing only works on your home network (not over Tailscale)"
 }
 
-USB_DEVICE_USAGE="Use: usb-device VENDOR:PRODUCT always|never|auto"
+USB_DEVICE_USAGE="Use: usb-device VENDOR:PRODUCT[/ID] always|never|auto (ID: the device's own, if it has one)"
 USB_PORT_USAGE="Use: usb-port PORT on|off (PORT is like 1-1, or 1-1.3 for a port on a hub)"
 
+# A device's setting is kept under vendor:product, plus its own ID when it has
+# one (a serial number, or a controller's Bluetooth address), so two of the
+# same controller can be set apart.
 cmd_usb_device() {
   local id=${1,,} rule=${2:-}
-  [[ $id =~ ^[0-9a-f]{4}:[0-9a-f]{4}$ ]] || die "$USB_DEVICE_USAGE"
+  [[ $id =~ ^[0-9a-f]{4}:[0-9a-f]{4}(/[0-9a-z:._-]{1,64})?$ ]] || die "$USB_DEVICE_USAGE"
   case "$rule" in
     always|never) usb_conf_set "device.${id}" "$rule" ;;
     auto) usb_conf_set "device.${id}" ;;

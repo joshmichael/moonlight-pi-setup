@@ -54,7 +54,9 @@ KINDS = {
 }
 
 PORT_KEY_RE = re.compile(r'^[0-9]{1,3}-[0-9]{1,3}(\.[0-9]{1,3}){0,6}$')
-MODEL_RE = re.compile(r'^[0-9a-f]{4}:[0-9a-f]{4}$')
+# A device's settings are kept under its model (vendor:product), plus its own ID
+# when it has one (model/ID), so two of the same controller can be set apart.
+DEVICE_KEY_RE = re.compile(r'^[0-9a-f]{4}:[0-9a-f]{4}(/[0-9a-z:._-]{1,64})?$')
 
 
 def _read(path, default=''):
@@ -73,7 +75,7 @@ def board_model():
 # Settings (changed only by the settings helper, as root)
 # ---------------------------------------------------------------------------
 def load_config(path=CONFIG):
-    """{'tailscale': bool, 'devices': {model: 'always'|'never'}, 'ports': set of port keys}."""
+    """{'tailscale': bool, 'devices': {device key: 'always'|'never'}, 'ports': set of port keys}."""
     cfg = {'tailscale': False, 'devices': {}, 'ports': set()}
     try:
         with open(path) as f:
@@ -86,7 +88,7 @@ def load_config(path=CONFIG):
             continue
         if key == 'tailscale':
             cfg['tailscale'] = value == '1'
-        elif key.startswith('device.') and MODEL_RE.match(key[7:]) and value in ('always', 'never'):
+        elif key.startswith('device.') and DEVICE_KEY_RE.match(key[7:]) and value in ('always', 'never'):
             cfg['devices'][key[7:]] = value
         elif key.startswith('port.') and PORT_KEY_RE.match(key[5:]) and value == 'on':
             cfg['ports'].add(key[5:])
@@ -307,9 +309,46 @@ def _driver(path):
     return os.path.basename(os.path.realpath(path + '/driver')) if os.path.exists(path + '/driver') else ''
 
 
-def devices(seen=None):
+def _clean_id(text):
+    """A device ID as the settings keep it: lower case, safe characters, and
+    not just zeros (which some devices report)."""
+    text = re.sub(r'[^0-9a-z:._-]', '', (text or '').lower())[:64]
+    return text if set(text) - set('0:._-') else ''
+
+
+def _ident(path, address):
+    """The device's own ID, if it has one: its USB serial number, or else the
+    ID Linux reads from it (a DualSense's Bluetooth address, for example)."""
+    ident = _clean_id(_read(path + '/serial'))
+    if ident:
+        return ident
+    for uniq in sorted(glob.glob('%s/%s:*/input/input*/uniq' % (path, address)) +
+                       glob.glob('%s/%s:*/*/input/input*/uniq' % (path, address))):
+        ident = _clean_id(_read(uniq))
+        if ident:
+            return ident
+    return ''
+
+
+def device_key(model, ident):
+    """Where a device's setting is kept: model/ID, or the model if it has no ID."""
+    return '%s/%s' % (model, ident) if ident else model
+
+
+def _seen_info(seen, model, key):
+    """What the Pi remembers about a device, or about another of its model."""
+    info = seen.get(key)
+    if not info:
+        info = next((v for k, v in seen.items() if k.split('/')[0] == model and isinstance(v, dict)), None)
+    return info or {}
+
+
+def devices(seen=None, idents=None):
     """The USB devices plugged in now (hubs too, with kind 'hub'), as dicts:
-    address, model (vendor:product), name, kind, port, hub, shared, builtin."""
+    address, devnum, model (vendor:product), ident (its own ID, '' if it has
+    none, None if unknown), key (where its setting is kept), name, kind, port,
+    hub, shared, builtin. A shared device's ID can only be read before it's
+    shared: idents remembers it, by (address, devnum)."""
     seen = load_seen() if seen is None else seen
     model_name = board_model()
     out = []
@@ -321,20 +360,23 @@ def devices(seen=None):
         if not vid:
             continue
         model = '%s:%s' % (vid, pid)
+        devnum = _read(path + '/devnum')
         hub = _read(path + '/bDeviceClass') == '09'
         shared = _driver(path) == 'usbip-host'
         if hub:
-            kind = 'hub'
+            kind, ident = 'hub', ''
         elif shared:
             # Shared, its interfaces aren't on the Pi any more: use what it was.
-            kind = (seen.get(model) or {}).get('kind') or 'other'
+            ident = (idents or {}).get((entry, devnum))
+            kind = _seen_info(seen, model, device_key(model, ident)).get('kind') or 'other'
         else:
-            kind = _kind(path, entry)
+            kind, ident = _kind(path, entry), _ident(path, entry)
         key = port_key(entry)
         builtin = (_read(_port_dir(entry) + '/connect_type') == 'hardwired' or
                    # The Pi 500's own keyboard is a USB device inside it.
                    ('Raspberry Pi 500' in model_name and vid == '2e8a' and kind == 'keyboard'))
-        out.append({'address': entry, 'model': model, 'name': _name(path, vid, pid), 'kind': kind,
+        out.append({'address': entry, 'devnum': devnum, 'model': model, 'ident': ident,
+                    'key': device_key(model, ident), 'name': _name(path, vid, pid), 'kind': kind,
                     'port': key, 'hub': hub, 'shared': shared, 'builtin': builtin})
     return out
 
@@ -350,8 +392,9 @@ def hub_ports(address):
 
 
 def decide(dev, cfg):
-    """(goes to the PC while streaming, why), for a device that isn't a hub."""
-    rule = cfg['devices'].get(dev['model'])
+    """(goes to the PC while streaming, why), for a device that isn't a hub. A
+    device with its own ID has its own setting; others share their model's."""
+    rule = cfg['devices'].get(dev['key'])
     if rule == 'always':
         return True, 'you set it to Always'
     if rule == 'never':
@@ -378,22 +421,29 @@ def snapshot():
     port's name); built-in devices are left out."""
     cfg = load_config()
     seen = load_seen()
+    status = load_status()
+    # A shared device's ID can't be read on the Pi: the sharing service reports it.
+    idents = {(a, n): i for a, n, i in status.get('ids', []) if isinstance(i, str)}
     roots = root_ports()
     devs = []
-    for d in devices(seen):
+    for d in devices(seen, idents):
         if d['builtin']:
             continue
         d['label'] = port_label(d['port'], roots)
         if not d['hub']:
             d['goes'], d['why'] = decide(d, cfg)
         devs.append(d)
-    plugged = {d['model'] for d in devs}
+    plugged = {d['key'] for d in devs}
+    with_ids = {k.split('/')[0] for k in list(seen) + list(plugged) if '/' in k}
     remembered = []
-    for model, info in sorted(seen.items(), key=lambda kv: -kv[1].get('last', 0)):
-        if model not in plugged and isinstance(info, dict):
-            rule = cfg['devices'].get(model)
-            remembered.append({'model': model, 'name': info.get('name') or model,
-                               'kind': info.get('kind') or 'other', 'rule': rule})
+    for key, info in sorted(seen.items(), key=lambda kv: -(kv[1] or {}).get('last', 0)):
+        if key in plugged or not isinstance(info, dict) or not DEVICE_KEY_RE.match(key):
+            continue
+        model, _, ident = key.partition('/')
+        if not ident and model in with_ids:
+            continue        # an old entry for a model whose devices have their own IDs
+        remembered.append({'key': key, 'model': model, 'ident': ident, 'name': info.get('name') or model,
+                           'kind': info.get('kind') or 'other', 'rule': cfg['devices'].get(key)})
     # Every socket, every port of the hubs plugged in, and any other port with a rule.
     keys = set(roots) | set(cfg['ports'])
     for d in devs:
@@ -406,7 +456,7 @@ def snapshot():
         ports[d['port']]['devices'].append(d)
     return {'devices': devs, 'remembered': remembered,
             'ports': sorted(ports.values(), key=lambda p: _split(p['key'])),
-            'config': cfg, 'status': load_status()}
+            'config': cfg, 'status': status}
 
 
 def is_tailscale(addr):
@@ -601,6 +651,7 @@ class Service:
         self.rules = None
         self.seen = load_seen()
         self.seen_changed = False
+        self.idents = {}        # (address, devnum) -> a device's own ID, read while it's on the Pi
         self.last = load_status().get('last')
         self.status = None
 
@@ -643,10 +694,10 @@ class Service:
 
     # -- sharing ------------------------------------------------------------
     def remember(self, dev):
-        info = self.seen.get(dev['model'])
+        info = self.seen.get(dev['key'])
         if not info or info.get('name') != dev['name'] or info.get('kind') != dev['kind'] or \
                 time.time() - info.get('last', 0) > 3600:
-            self.seen[dev['model']] = {'name': dev['name'], 'kind': dev['kind'], 'last': int(time.time())}
+            self.seen[dev['key']] = {'name': dev['name'], 'kind': dev['kind'], 'last': int(time.time())}
             self.seen_changed = True
 
     def save_seen(self):
@@ -674,13 +725,18 @@ class Service:
             else:
                 log("Couldn't update the firewall: %s" % err)
         want, names = set(), []
-        devs = devices(self.seen)
+        devs = devices(self.seen, self.idents)
+        self.idents = {k: v for k, v in self.idents.items() if k in {(d['address'], d['devnum']) for d in devs}}
         for d in devs:
             if d['hub'] or d['builtin']:
                 continue
             if not d['shared']:
+                self.idents[(d['address'], d['devnum'])] = d['ident']
                 self.remember(d)
-            if pc_ready and decide(d, cfg)[0]:
+            # A device shared before this service started (it restarted mid-stream):
+            # its ID can't be read now, so it stays shared until the stream ends.
+            unknown = d['shared'] and d['ident'] is None
+            if pc_ready and (unknown or decide(d, cfg)[0]):
                 want.add(d['address'])
                 names.append(d['name'])
         shared = shared_addresses()
@@ -697,8 +753,10 @@ class Service:
             if {k: v for k, v in (self.last or {}).items() if k != 'time'} != last:
                 self.last = dict(last, time=int(time.time()))
         self.save_seen()
+        shared = shared_addresses()
+        ids = sorted([a, n, i] for (a, n), i in self.idents.items() if a in shared and i)
         status = {'streaming': self.streaming, 'pc': pc, 'pc_ready': pc_ready,
-                  'ready': sorted(ready), 'shared': sorted(shared_addresses()), 'last': self.last}
+                  'ready': sorted(ready), 'shared': sorted(shared), 'ids': ids, 'last': self.last}
         if status != self.status:
             self.status = status
             write_json(STATUS, dict(status, updated=int(time.time())))
@@ -744,8 +802,8 @@ if __name__ == '__main__':
     if sys.argv[1:] == ['list']:
         for dev in snapshot()['devices']:
             goes = '' if dev['hub'] else (' -> PC' if dev['goes'] else ' (stays)')
-            print('%-10s %-9s %-14s %s [%s]%s' % (dev['address'], dev['model'], kind_label(dev['kind']),
-                                                   dev['name'], dev['label'], goes))
+            print('%-10s %-28s %-14s %s [%s]%s' % (dev['address'], dev['key'], kind_label(dev['kind']),
+                                                    dev['name'], dev['label'], goes))
         sys.exit(0)
     print('Use: usb_sharing.py serve|list', file=sys.stderr)
     sys.exit(2)
