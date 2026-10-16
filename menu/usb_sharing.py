@@ -18,6 +18,7 @@ import glob
 import ipaddress
 import json
 import os
+import pwd
 import re
 import signal
 import socket
@@ -467,6 +468,33 @@ def is_tailscale(addr):
     return any(ip in net for net in TAILSCALE_NETS)
 
 
+def moonlight_conf():
+    """Moonlight's settings file, for the user the Pi is set up for."""
+    user = ''
+    for line in _read(STATE_DIR + '/state').splitlines():
+        if line.startswith('user='):
+            user = line[5:]
+    try:
+        home = pwd.getpwnam(user).pw_dir
+    except KeyError:
+        return None
+    return os.path.join(home, '.config', 'Moonlight Game Streaming Project', 'Moonlight.conf')
+
+
+def pc_addresses(addr):
+    """Every address Moonlight knows for the PC at this address: its home
+    address, its Tailscale one and so on. A stream can go to its Tailscale
+    address even at home, while its helper checks in from its home address."""
+    import settings     # the menu's module (it reads Moonlight's settings)
+    conf = moonlight_conf()
+    for h in settings.moonlight_hosts(conf) if conf else []:
+        addrs = {h.get(k, '').strip('[]') for k in ('localaddress', 'manualaddress', 'remoteaddress',
+                                                     'ipv6address')} - {''}
+        if addr in addrs:
+            return addrs | {addr}
+    return {addr}
+
+
 # ---------------------------------------------------------------------------
 # The sharing service (root)
 # ---------------------------------------------------------------------------
@@ -589,18 +617,18 @@ table inet %(t)s {
 ''' % {'t': NFT_TABLE, 's': READY_SECONDS, 'p': USBIP_PORT})
 
 
-def firewall_rules(tailscale, pc):
+def firewall_rules(tailscale, pcs):
     """Who may ask for devices: never over Tailscale unless it's allowed, and
-    during a stream only the PC being streamed to."""
+    during a stream only the PC being streamed to (pcs: its addresses)."""
     rules = []
     if not tailscale:
         rules.append('iifname "tailscale0" drop')
     rules += ['ct state new update @ready4 { ip saddr }', 'ct state new update @ready6 { ip6 saddr }']
-    if pc:
-        if ':' in pc:
-            rules += ['meta nfproto ipv4 drop', 'ip6 saddr != %s drop' % pc]
-        else:
-            rules += ['meta nfproto ipv6 drop', 'ip saddr != %s drop' % pc]
+    if pcs:
+        v4 = [a for a in pcs if ':' not in a]
+        v6 = [a for a in pcs if ':' in a]
+        rules.append('ip saddr != { %s } drop' % ', '.join(v4) if v4 else 'meta nfproto ipv4 drop')
+        rules.append('ip6 saddr != { %s } drop' % ', '.join(v6) if v6 else 'meta nfproto ipv6 drop')
     body = ''.join('    %s\n' % r for r in rules)
     return nft('flush chain inet %s usbip\ntable inet %s {\n  chain usbip {\n%s  }\n}\n' % (NFT_TABLE, NFT_TABLE, body))
 
@@ -648,6 +676,7 @@ class Service:
         self.watcher = LogWatcher()
         self.streaming, self.pc = False, None
         self.pending = None
+        self.pc_looked_up, self.pc_addrs = None, set()
         self.rules = None
         self.seen = load_seen()
         self.seen_changed = False
@@ -713,11 +742,15 @@ class Service:
         self.follow_log()
         cfg = load_config()
         pc = self.pc if self.streaming else None
-        allowed = bool(pc) and (cfg['tailscale'] or not is_tailscale(pc))
+        if pc != self.pc_looked_up:
+            self.pc_looked_up = pc
+            self.pc_addrs = pc_addresses(pc) if pc else set()
+        # The PC's addresses that may take devices: not its Tailscale ones unless
+        # that's allowed. Check it's ready before narrowing the firewall to them.
+        allowed = sorted(a for a in self.pc_addrs if cfg['tailscale'] or not is_tailscale(a))
         ready = ready_addresses()
-        # Check the PC is ready before narrowing the firewall to it.
-        pc_ready = allowed and pc in ready
-        rules = (cfg['tailscale'], pc if allowed else None)
+        pc_ready = bool(set(allowed) & ready)
+        rules = (cfg['tailscale'], tuple(allowed))
         if rules != self.rules:
             ok, err = firewall_rules(*rules)
             if ok:
@@ -749,7 +782,7 @@ class Service:
         if self.streaming:
             # What happened in this stream, for the menu to show afterwards.
             last = {'pc': pc, 'ready': pc_ready, 'devices': sorted(set(names)),
-                    'tailscale_blocked': bool(pc) and is_tailscale(pc) and not cfg['tailscale']}
+                    'tailscale_blocked': not pc_ready and bool(pc) and is_tailscale(pc) and not cfg['tailscale']}
             if {k: v for k, v in (self.last or {}).items() if k != 'time'} != last:
                 self.last = dict(last, time=int(time.time()))
         self.save_seen()
