@@ -412,11 +412,32 @@ class UsbPortsScreen(SnapshotMixin, ListScreen):
 # ---------------------------------------------------------------------------
 # Set up your PC
 # ---------------------------------------------------------------------------
+def wrap_anywhere(text, size, width):
+    """Word-wrapped lines, also breaking words too long for a line (like a web
+    address), after a '/' where possible."""
+    f = ui.font(size)
+    lines = []
+    for line in ui.wrap(f, text, width):
+        while f.size(line)[0] > width:
+            cut = len(line)
+            while cut > 1 and f.size(line[:cut])[0] > width:
+                cut -= 1
+            slash = line.rfind('/', 0, cut)
+            if slash > cut // 2:
+                cut = slash + 1
+            lines.append(line[:cut])
+            line = line[cut:]
+        lines.append(line)
+    return lines
+
+
 def draw_pc_command(surf, x, y, width, app):
     """The PC setup command and this Pi's address. Returns the y below them."""
-    box_h = 20 + len(ui.wrap(ui.font(26), settings.PC_SETUP_COMMAND, width - 48)) * 36 + 20
+    lines = wrap_anywhere(settings.PC_SETUP_COMMAND, 26, width - 48)
+    box_h = 20 + len(lines) * 36 + 16
     rrect(surf, PANEL_HI, pygame.Rect(x, y, width, box_h), 14)
-    draw_wrapped(surf, settings.PC_SETUP_COMMAND, (x + 24, y + 20), width - 48, 26, TEXT, line_gap=5)
+    for i, line in enumerate(lines):
+        draw_text(surf, line, (x + 24, y + 20 + i * 36), 26, TEXT)
     y += box_h + 16
     addr = pi_address(app)
     if addr:
@@ -450,7 +471,7 @@ class PcSetupScreen(Screen):
             ('On your gaming PC, open PowerShell', 'Search for PowerShell in the Start menu. Your normal account is '
                                                    'fine.'),
             ('Paste this command and press Enter', '')])
-        y = draw_pc_command(surf, right_x + 84, y - 20, width - 84, self.app) + 20
+        y = draw_pc_command(surf, right_x + 84, y - 56, width - 84, self.app) + 20
         ui.numbered_steps(surf, right_x, y, width, [
             ('Answer Yes to sharing USB devices', 'It installs usbip-win2 (Windows asks for permission once) and '
-                                                  'finds this Pi by itself. Restart the PC when it asks.')])
+                                                  'finds this Pi by itself. Restart the PC when it asks.')], first=3)

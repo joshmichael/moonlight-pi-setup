@@ -305,9 +305,10 @@ def tick_mark(surf, center):
     pygame.draw.lines(surf, WHITE, False, [(x - 55, y), (x - 15, y + 45), (x + 60, y - 45)], 18)
 
 
-def numbered_steps(surf, x, y, width, steps):
-    """Steps numbered 1, 2, 3..., each a (heading, text) pair. Returns the y below them."""
-    for num, (head, body) in enumerate(steps, 1):
+def numbered_steps(surf, x, y, width, steps, first=1):
+    """Steps numbered 1, 2, 3... (or from first), each a (heading, text) pair.
+    Returns the y below them."""
+    for num, (head, body) in enumerate(steps, first):
         pygame.draw.circle(surf, ACCENT, (x + 30, y + 30), 30)
         draw_text(surf, str(num), (x + 30, y + 30), 34, WHITE, bold=True, anchor='center')
         draw_text(surf, head, (x + 84, y + 8), 36, TEXT, bold=True, max_width=width - 84)
