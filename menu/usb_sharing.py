@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 
+import bluetooth
 import usb_combo
 
 SYS_USB = '/sys/bus/usb/devices'
@@ -323,7 +324,8 @@ def _kind(path, address):
         return 'audio'
     if '08' in names:
         return 'storage'
-    if ('e0', '01', '01') in classes:
+    # Some adapters (Broadcom's) don't use the standard class: Linux knows them anyway.
+    if ('e0', '01', '01') in classes or glob.glob('%s/%s:*/bluetooth/hci*' % (path, address)):
         return 'bluetooth'
     return 'other'
 
@@ -358,6 +360,25 @@ def device_key(model, ident):
     return '%s/%s' % (model, ident) if ident else model
 
 
+_hci_addresses = {}     # (address, devnum, hci) -> that adapter's Bluetooth address
+
+
+def _pi_adapter(path, address, devnum, key, choice):
+    """Whether a Bluetooth adapter is the one the Pi uses for controllers
+    (chosen in Controllers > Bluetooth adapter): it never goes to the PC."""
+    if not choice:
+        return False
+    hcis = [os.path.basename(h) for h in glob.glob('%s/%s:*/bluetooth/hci*' % (path, address))]
+    for hci in hcis:
+        k = (address, devnum, hci)
+        if not _hci_addresses.get(k):
+            _hci_addresses[k] = bluetooth.hci_address(hci)
+        if _hci_addresses[k] == choice['address']:
+            return True
+    # Its address isn't known (just plugged in, or shared): go by its model and ID.
+    return not any(_hci_addresses.get((address, devnum, h)) for h in hcis) and key == choice.get('key')
+
+
 def _seen_info(seen, model, key):
     """What the Pi remembers about a device, or about another of its model."""
     info = seen.get(key)
@@ -370,10 +391,12 @@ def devices(seen=None, idents=None):
     """The USB devices plugged in now (hubs too, with kind 'hub'), as dicts:
     address, devnum, model (vendor:product), ident (its own ID, '' if it has
     none, None if unknown), key (where its setting is kept), name, kind, port,
-    hub, shared, builtin. A shared device's ID can only be read before it's
-    shared: idents remembers it, by (address, devnum)."""
+    hub, shared, builtin, pi_bluetooth (the Bluetooth adapter the Pi uses for
+    controllers). A shared device's ID can only be read before it's shared:
+    idents remembers it, by (address, devnum)."""
     seen = load_seen() if seen is None else seen
     model_name = board_model()
+    bt_choice = bluetooth.load_choice()
     out = []
     for entry in sorted(os.listdir(SYS_USB) if os.path.isdir(SYS_USB) else []):
         if ':' in entry or entry.startswith('usb') or not PORT_KEY_RE.match(entry):
@@ -398,9 +421,10 @@ def devices(seen=None, idents=None):
         builtin = (_read(_port_dir(entry) + '/connect_type') == 'hardwired' or
                    # The Pi 500's own keyboard is a USB device inside it.
                    ('Raspberry Pi 500' in model_name and vid == '2e8a' and kind == 'keyboard'))
+        pi_bt = kind == 'bluetooth' and _pi_adapter(path, entry, devnum, device_key(model, ident), bt_choice)
         out.append({'address': entry, 'devnum': devnum, 'model': model, 'ident': ident,
                     'key': device_key(model, ident), 'name': _name(path, vid, pid), 'kind': kind,
-                    'port': key, 'hub': hub, 'shared': shared, 'builtin': builtin})
+                    'port': key, 'hub': hub, 'shared': shared, 'builtin': builtin, 'pi_bluetooth': pi_bt})
     return out
 
 
@@ -417,6 +441,8 @@ def hub_ports(address):
 def decide(dev, cfg):
     """(goes to the PC while streaming, why), for a device that isn't a hub. A
     device with its own ID has its own setting; others share their model's."""
+    if dev.get('pi_bluetooth'):
+        return False, 'the Pi uses it for Bluetooth controllers'
     rule = cfg['devices'].get(dev['key'])
     if rule == 'always':
         return True, 'you set it to Always'

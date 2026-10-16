@@ -68,13 +68,20 @@ Use a controller (D-pad or left stick, A to select, B to go back), a keyboard (a
 | Item | What it does |
 |---|---|
 | **Start Moonlight** | Back to Moonlight (or press Start) |
-| **Controllers** | Pair Bluetooth controllers, and connect, disconnect or forget them. Shows battery levels |
+| **Controllers** | Pair Bluetooth controllers, and connect, disconnect or forget them. Shows battery levels. **Bluetooth adapter** chooses between the Pi's own Bluetooth and a USB adapter |
 | **Wi-Fi & network** | Network status, Wi-Fi on or off, choosing a network (with an on-screen keyboard), setting up Wi-Fi from your phone, and saved networks |
 | **Settings** | See [Settings](#settings) |
 | **Restart or shut down** | Restarts or shuts down the Pi |
 | **Command line** | Leaves the menu for a text command line (needs a keyboard). Type `exit` to come back |
 
 **Pairing a controller:** choose **Controllers → Pair a new controller** and put the controller in pairing mode. On a DualSense or DualShock 4, hold **Create/Share + PS**. On an Xbox controller, hold the pair button on top. If no controller is connected or paired at all, the menu pairs the first one it finds by itself, so you can set up a new Pi without a keyboard.
+
+**A USB Bluetooth adapter:** choose it in **Controllers → Bluetooth adapter**, then pair your controllers again (a pairing belongs to one adapter). A USB adapter can reach further than the Pi's own Bluetooth: plug it into a black (USB 2) port, ideally on a short extension cable, since USB 3 ports interfere with Bluetooth.
+
+- Controllers then use only that adapter, and the Pi's built-in Bluetooth is switched off (rfkill). Choosing **Built-in Bluetooth** switches it back on.
+- USB sharing never sends that adapter to your PC, even if it's set to Always or plugged into a PC port. A second adapter can still go to the PC, for example one used for Wii Remotes in Dolphin: set it to **Always** in **Settings → USB sharing → Devices**. An adapter set to go to the PC is greyed out in the adapter list.
+- If the adapter isn't plugged in, the Controllers screen says so. It's switched on again whenever it's plugged in, in any port.
+- Most adapters work: Realtek ones (with the `firmware-realtek` firmware Raspberry Pi OS includes), CSR and Broadcom ones.
 
 **Wi-Fi from your phone:** choose **Wi-Fi & network → Set up Wi-Fi from your phone**. It also starts by itself when the Pi boots without a network. The Pi starts its own Wi-Fi network and shows a QR code. Scan it, and a setup page opens on your phone (or open `http://10.42.0.1`). Choose your Wi-Fi and type its password. If the password was wrong, the setup network comes back so you can try again. It has its own password, shown only on the TV, and switches off after 15 minutes.
 
@@ -141,7 +148,7 @@ USB sharing sends USB devices plugged into the Pi, like a wired controller, to y
 Notes:
 
 - **Moonlight's controller shortcut still ends the stream** while the controller is on the PC: Select+Start+L1+R1 (Create+Options+L1+R1 on a DualSense, View+Menu+LB+RB on an Xbox controller). Moonlight can't see the controller then, but its button presses still pass through the Pi, so the Pi spots the shortcut and presses Ctrl+Alt+Shift+Q for Moonlight on a virtual keyboard. It works with PlayStation controllers (DualSense, DualShock 4) and Xbox controllers (360, One and Series, and controllers that work like them). The game on the PC sees those buttons pressed too. With other controllers, quit the game on the PC, or press Ctrl+Alt+Shift+Q on a keyboard plugged into the Pi.
-- Bluetooth controllers always stay with the Pi, because the Pi's built-in Bluetooth isn't a USB device. For full DualSense features on the PC, use a USB cable.
+- Bluetooth controllers always stay with the Pi: the Bluetooth adapter they use never goes to the PC, even a USB one. For full DualSense features on the PC, use a USB cable.
 - **Vibepollo** also uses usbip-win2, for its DualSense emulation: a controller that stays on the Pi still shows up on the PC as an emulated DualSense, through Moonlight. That's Moonlight's normal controller support, not USB sharing. Removing USB sharing from the PC leaves usbip-win2 installed when another program uses it.
 - Some devices don't work with usbip-win2, for example a PowerA wired Xbox Series X controller ([vadimgrn/usbip-win2#170](https://github.com/vadimgrn/usbip-win2/issues/170)). The usbip-win2 wiki lists [devices known to work](https://github.com/vadimgrn/usbip-win2/wiki).
 - What it's doing: on the Pi, `journalctl -u moonlight-usb-sharing --no-pager`; on the PC, `%LOCALAPPDATA%\Programs\moonlight-pi-setup\usb-helper.log`.
@@ -180,6 +187,7 @@ It also offers to install Tailscale. Run it again to check and repair everything
 | Installs the settings helper, `/usr/local/lib/moonlight-pi-setup/moonlight-settings`, with a sudoers rule | The script and the menu change settings through this one root-owned helper, which only accepts its own commands. It keeps its records in `/var/lib/moonlight-pi-setup` |
 | Installs Tailscale, and `usbip` (the Linux USB/IP tools) with `apt` | Tailscale does nothing until you sign in. USB sharing does nothing until a PC is set up for it |
 | By default, and changeable in Settings: quiet-boot options in `/boot/firmware/cmdline.txt` and `config.txt`, the `moonlight-quit-on-shutdown` service, Wi-Fi power saving off (`/etc/NetworkManager/conf.d/90-moonlight-pi-setup-wifi.conf`), and the `moonlight-usb-sharing` service (with `/etc/modules-load.d/moonlight-usb-sharing.conf` and its own `moonlight_usb` firewall table) | See above. Changing the setting undoes it |
+| Only if you choose a USB Bluetooth adapter (Controllers → Bluetooth adapter): the built-in Bluetooth switched off with rfkill, and `/etc/udev/rules.d/90-moonlight-bluetooth-adapter.rules` | Switches the chosen adapter on whenever it's plugged in. Choosing Built-in Bluetooth again, or uninstalling, undoes it |
 
 Everything the script adds to a file is marked, and changed files are backed up first.
 

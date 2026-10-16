@@ -22,6 +22,10 @@
 #                                what a device does (KEY: vendor:product, plus /its-own-ID
 #                                if it has one); auto goes by its type
 #   usb-port PORT on|off         send anything plugged into a port (PORT: e.g. 1-1, or 1-1.3 on a hub)
+#   bt-adapter ADDRESS KEY       controllers use this USB Bluetooth adapter (its Bluetooth address,
+#                                and its USB vendor:product[/ID]); the built-in one is switched off
+#   bt-adapter builtin           controllers use the Pi's built-in Bluetooth again
+#   bt-adapter apply             switch the chosen adapter on (when it's plugged in)
 #   quiet-boot on|off            hide boot messages (after a restart)
 #   wifi-powersave on|off        Wi-Fi power saving
 #   wifi-country XX              Wi-Fi country (two letters)
@@ -55,6 +59,8 @@ USB_SERVICE="/etc/systemd/system/${USB_SERVICE_NAME}"
 USB_MODULES="/etc/modules-load.d/moonlight-usb-sharing.conf"
 USB_CONFIG="${ROOT_STATE_DIR}/usb-sharing.conf"
 USB_AVAHI_SERVICE="/etc/avahi/services/moonlight-usb-sharing.service"
+BT_CONFIG="${ROOT_STATE_DIR}/bluetooth.conf"
+BT_UDEV_RULE="/etc/udev/rules.d/90-moonlight-bluetooth-adapter.rules"
 COUNTRIES="/usr/share/zoneinfo/iso3166.tab"
 
 MARK_BEGIN="# >>> moonlight-pi-setup >>>"
@@ -576,6 +582,95 @@ cmd_usb_port() {
 }
 
 # ---------------------------------------------------------------------------
+# bt-adapter
+# ---------------------------------------------------------------------------
+# Controllers use one Bluetooth adapter: the built-in one, or a USB adapter
+# saved in BT_CONFIG (by its Bluetooth address). While a USB adapter is chosen,
+# the built-in one is switched off with rfkill, which systemd remembers across
+# restarts. systemd remembers a USB adapter's rfkill state by the port it's in,
+# so a udev rule switches the chosen one on again whenever it's plugged in.
+BT_ADAPTER_USAGE="Use: bt-adapter ADDRESS KEY (its Bluetooth address, and its USB vendor:product[/ID]), or bt-adapter builtin|apply"
+
+# bt_hcis usb|builtin: the names (hci0...) of the USB or built-in adapters.
+bt_hcis() {
+  local h dev
+  for h in /sys/class/bluetooth/hci*; do
+    [[ $(basename "$h") =~ ^hci[0-9]+$ ]] || continue
+    dev=$(basename "$(readlink -f "$h/device")")
+    if [[ $dev =~ ^[0-9]+-[0-9.]+:[0-9]+\.[0-9]+$ ]]; then
+      [[ $1 == usb ]] && basename "$h"
+    else
+      [[ $1 == builtin ]] && basename "$h"
+    fi
+  done
+  return 0
+}
+
+# rfkill_set <hci> 0|1: switch an adapter's radio on (0) or off (1).
+rfkill_set() {
+  local r
+  for r in /sys/class/bluetooth/"$1"/rfkill*/soft; do
+    [[ -e $r ]] && echo "$2" > "$r"
+  done
+  return 0
+}
+
+bt_address() {
+  { busctl get-property org.bluez "/org/bluez/$1" org.bluez.Adapter1 Address 2> /dev/null || true; } \
+    | sed -n 's/^s "\(.*\)"$/\1/p' | tr 'a-f' 'A-F'
+}
+
+# The chosen adapter on, if it's plugged in; the built-in one off while a USB
+# adapter is chosen, on otherwise.
+bt_apply() {
+  local address h
+  address=$(kv_get "$BT_CONFIG" address)
+  for h in $(bt_hcis builtin); do
+    if [[ -n $address ]]; then rfkill_set "$h" 1; else rfkill_set "$h" 0; fi
+  done
+  [[ -n $address ]] || return 0
+  for h in $(bt_hcis usb); do
+    if [[ $(bt_address "$h") == "$address" ]]; then
+      rfkill_set "$h" 0
+    fi
+  done
+}
+
+cmd_bt_adapter() {
+  local address=${1:-} key=${2:-}
+  case "$address" in
+    builtin)
+      rm -f "$BT_CONFIG" "$BT_UDEV_RULE"
+      udevadm control --reload 2> /dev/null || true
+      bt_apply
+      say "Controllers use the Pi's built-in Bluetooth"
+      ;;
+    apply)
+      bt_apply
+      ;;
+    *)
+      address=${address^^}
+      key=${key,,}
+      [[ $address =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]] || die "$BT_ADAPTER_USAGE"
+      [[ $key =~ ^[0-9a-f]{4}:[0-9a-f]{4}(/[0-9a-z:._-]{1,64})?$ ]] || die "$BT_ADAPTER_USAGE"
+      install -d -m 755 "$ROOT_STATE_DIR"
+      printf '%s\n' "# Written by moonlight-settings: the Bluetooth adapter controllers use" \
+        "address=${address}" "key=${key}" > "${BT_CONFIG}.tmp"
+      chmod 644 "${BT_CONFIG}.tmp"
+      mv "${BT_CONFIG}.tmp" "$BT_CONFIG"
+      # After 3 seconds, so systemd has put back the state it remembered first.
+      printf '%s\n' "# Installed by moonlight-pi-setup: switches on the Bluetooth adapter chosen for" \
+        "# controllers (Controllers > Bluetooth adapter) whenever it's plugged in." \
+        "ACTION==\"add\", SUBSYSTEM==\"rfkill\", ATTR{type}==\"bluetooth\", RUN+=\"/usr/bin/systemd-run --quiet --on-active=3 --timer-property=AccuracySec=100ms ${LIB_DIR}/moonlight-settings bt-adapter apply\"" \
+        > "$BT_UDEV_RULE"
+      udevadm control --reload 2> /dev/null || true
+      bt_apply
+      say "Controllers use the Bluetooth adapter ${address}"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # quiet-boot
 # ---------------------------------------------------------------------------
 # The boot options this helper added (only ever ones from QUIET_TOKENS).
@@ -812,7 +907,7 @@ main() {
       load_user
       "${cmd//-/_}_${value}"
       ;;
-    usb-device|usb-port|usb-latency) require_root; lock; "cmd_${cmd//-/_}" "$value" "$extra" ;;
+    usb-device|usb-port|usb-latency|bt-adapter) require_root; lock; "cmd_${cmd//-/_}" "$value" "$extra" ;;
     wifi-country) require_root; lock; cmd_wifi_country "$value" ;;
     tailscale) require_root; cmd_tailscale "$value" ;;
     updates) require_root; lock; cmd_updates "$value" ;;

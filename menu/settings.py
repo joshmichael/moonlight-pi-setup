@@ -185,6 +185,13 @@ def usb_port(key, on):
         return _run(['usb-port', key, 'on' if on else 'off'], root=True)
 
 
+def bt_adapter(address, key=''):
+    """The Bluetooth adapter controllers use: a USB adapter's Bluetooth address
+    and USB sharing key, or 'builtin'. 'apply' switches the chosen one on."""
+    with _lock:
+        return _run(['bt-adapter', address] + ([key] if key else []), root=True)
+
+
 def set_speakers(mode):
     with _lock:
         return _run(['speakers', mode])

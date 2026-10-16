@@ -373,12 +373,18 @@ class UsbDeviceScreen(ChoiceScreen):
                      'model can be set differently.' % short_id(dev['ident']))
         else:
             which = "This is for every one of this model: it has no ID of its own to tell them apart."
+        if dev.get('pi_bluetooth'):
+            which = ('The Pi uses this adapter for Bluetooth controllers, so it always stays on the Pi. To '
+                     'change that, choose another one in Controllers → Bluetooth adapter.')
         super().__init__(app, dev['name'], 'Where should it go while you stream?',
                          '%s, %s. %s' % (usb_sharing.kind_label(dev['kind']), where, which),
                          [('auto', 'Automatic', auto + ' A PC port sends it to your PC too.', ''),
                           ('always', 'Always to your PC', 'In any port, whatever type of device it is.', ''),
                           ('never', 'Never to your PC', 'It stays on the Pi, even in a PC port.', '')],
                          rule or 'auto', self._pick)
+        if dev.get('pi_bluetooth'):
+            self.unavailable = dict.fromkeys(('auto', 'always', 'never'),
+                                             'The Pi uses it for Bluetooth controllers, so it stays on the Pi.')
 
     def extra_items(self):
         port = self.dev.get('port')

@@ -94,7 +94,8 @@ def play_speaker_test(app, mode):
 # ---------------------------------------------------------------------------
 class ChoiceScreen(ListScreen):
     """options: [(value, label, description, tag)]. The current value is
-    marked "Current" (or, with show_current=False, each option shows its tag)."""
+    marked "Current" (or, with show_current=False, each option shows its tag).
+    unavailable: {value: why}, for options shown greyed out."""
 
     def __init__(self, app, title, heading, intro, options, current=None, on_pick=None,
                  show_current=True, initial=None, step=''):
@@ -109,6 +110,7 @@ class ChoiceScreen(ListScreen):
         self.initial = initial if initial is not None else current
         self.step = step
         self.placed = False
+        self.unavailable = {}
 
     def refresh(self):
         items = []
@@ -117,7 +119,8 @@ class ChoiceScreen(ListScreen):
             if self.show_current and value == self.current:
                 detail, color = 'Current', GOOD
             items.append(Item(label, lambda v=value: self.on_pick(v), key=value, detail=detail,
-                              detail_color=color, desc=desc))
+                              detail_color=color, desc=desc, disabled=value in self.unavailable,
+                              reason=self.unavailable.get(value, '')))
         items += self.extra_items()
         self.list.set_items(items)
         if not self.placed:

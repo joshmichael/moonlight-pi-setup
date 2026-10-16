@@ -1049,6 +1049,10 @@ do_uninstall() {
     if [[ -f $USB_SERVICE ]]; then
       helper usb-sharing off
     fi
+    # Switches the built-in Bluetooth back on, if a USB adapter was chosen.
+    if [[ -f ${ROOT_STATE_DIR}/bluetooth.conf ]]; then
+      helper bt-adapter builtin
+    fi
   fi
 
   # TV menu and settings helper

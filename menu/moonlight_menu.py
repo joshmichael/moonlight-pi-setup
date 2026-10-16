@@ -31,7 +31,7 @@ import bluetooth  # noqa: E402
 import network  # noqa: E402
 import settings  # noqa: E402
 import ui  # noqa: E402
-from settings_screens import CountryScreen, QuickSetup, SettingsScreen  # noqa: E402
+from settings_screens import ChoiceScreen, CountryScreen, QuickSetup, SettingsScreen  # noqa: E402
 from ui import (W, H, MARGIN, CONTENT_Y, FOOTER_Y, HEADER_Y, BACK, BG, PANEL, ACCENT, TEXT, DIM, FAINT,  # noqa: E402
                 GOOD, WARN, BAD, WHITE, Item, ListScreen, Screen, Dialog, KeyboardScreen, draw_text, draw_wrapped,
                 rrect, dot)
@@ -181,6 +181,8 @@ class App:
 
         self.net_status = None
         self.bt_devices = []
+        self.bt_state = None           # bluetooth.Bluetooth.state(): the adapters
+        self.bt_applied = None         # when the chosen adapter was last switched on
         self.bt_loaded = False
         self.stack = []
         self.dialog = None
@@ -275,8 +277,8 @@ class App:
                 log.warning('network status: %s', e)
             if self.bt:
                 try:
-                    devs = self.bt.devices()
-                    self.call_soon(lambda d=devs: self._set_bt(d))
+                    st = self.bt.state()
+                    self.call_soon(lambda st=st: self._set_bt(st))
                 except Exception as e:
                     log.warning('bluetooth status: %s', e)
                 self._autopair_step()
@@ -288,11 +290,26 @@ class App:
         self.top.refresh()
         self.dirty = True
 
-    def _set_bt(self, devs):
-        self.bt_devices = devs
+    def _set_bt(self, st):
+        self.bt_state = st
+        self.bt_devices = st['devices']
         self.bt_loaded = True
+        # A chosen USB adapter that's switched off (systemd remembers that by the
+        # port it's in): the settings helper switches it on.
+        a = st['adapter']
+        if st['choice'] and a and a['blocked'] and (self.bt_applied is None or
+                                                    time.monotonic() - self.bt_applied > 15):
+            self.bt_applied = time.monotonic()
+            threading.Thread(target=self._switch_adapter_on, daemon=True).start()
         self.top.refresh()
         self.dirty = True
+
+    @staticmethod
+    def _switch_adapter_on():
+        try:
+            settings.bt_adapter('apply')
+        except settings.SettingsError as e:
+            log.warning('Bluetooth adapter: %s', e)
 
     def _check_autopair(self):
         """With no controller connected and none paired, pair the first one put in pairing mode."""
@@ -861,7 +878,10 @@ class ControllersScreen(ListScreen):
         if not app.bt:
             self.list.set_items([Item("Bluetooth isn't available on this Pi", selectable=False)])
             return
-        items = [Item('Pair a new controller', lambda: app.push(PairScreen(app)), key='pair')]
+        st = app.bt_state
+        missing = bool(st) and st['adapter'] is None
+        items = [Item('Pair a new controller', lambda: app.push(PairScreen(app)), key='pair',
+                      disabled=missing, reason="Your USB Bluetooth adapter isn't plugged in.")]
         paired = [d for d in app.bt_devices if d['paired']]
         paired.sort(key=lambda d: (not d['gamepad'], not d['connected'], d['name'].lower()))
         for d in paired:
@@ -874,6 +894,11 @@ class ControllersScreen(ListScreen):
                 detail, color = 'Not connected', None
             items.append(Item(d['name'], lambda d=d: app.push(DeviceScreen(app, d['address'])),
                               detail=detail, key=d['address'], detail_color=color))
+        if st:
+            a = st['adapter']
+            items.append(Item('Bluetooth adapter', lambda: app.push(AdapterScreen(app)), key='adapter',
+                              detail='Not plugged in' if missing else 'Built-in' if not a['usb'] else a['name'],
+                              detail_color=WARN if missing else None))
         self.list.set_items(items)
 
     def draw_panel(self, surf, rect):
@@ -885,9 +910,111 @@ class ControllersScreen(ListScreen):
         else:
             draw_text(surf, 'None', (rect.x, y), 32, DIM)
             y += 48
-        draw_wrapped(surf, 'Bluetooth controllers you pair here reconnect by themselves when you switch '
-                     'them on. Controllers plugged in with a USB cable work without pairing.',
-                     (rect.x, y + 30), rect.width, 30)
+        y = draw_wrapped(surf, 'Bluetooth controllers you pair here reconnect by themselves when you switch '
+                         'them on. Controllers plugged in with a USB cable work without pairing.',
+                         (rect.x, y + 30), rect.width, 30)
+        st = self.app.bt_state
+        if st and st['adapter'] is None:
+            draw_wrapped(surf, "The USB Bluetooth adapter controllers use isn't plugged in. Plug it in, or "
+                         'choose another one in Bluetooth adapter.', (rect.x, y + 24), rect.width, 30, WARN)
+
+
+class AdapterScreen(ChoiceScreen):
+    """Which Bluetooth adapter controllers use: the built-in one, or a USB one."""
+
+    def __init__(self, app):
+        super().__init__(app, 'Bluetooth adapter', 'Which Bluetooth adapter should controllers use?',
+                         "A USB Bluetooth adapter can reach further than the Pi's own. Plug it into a black "
+                         '(USB 2) port, ideally on a short extension cable. Controllers pair with one adapter, so '
+                         'pair them again after switching.', [], None, self._pick)
+        self.loaded = False
+        self.state = None
+
+    def enter(self):
+        self.app.run_task(self._load, self._loaded)
+
+    def _load(self):
+        import usb_sharing
+        return self.app.bt.state(), usb_sharing.snapshot(), settings.status().get('usb_sharing') == '1'
+
+    def _loaded(self, res, err):
+        if err:
+            self.app.message("Couldn't list the Bluetooth adapters", str(err))
+            return
+        import usb_sharing
+        st, snap, sharing = res
+        devs = {d['address']: d for d in snap['devices']}
+        options = [('builtin', 'Built-in Bluetooth', "The Pi's own Bluetooth. It's switched off while controllers "
+                    'use a USB adapter.', '')]
+        unavailable = {}
+        if all(a['usb'] for a in st['adapters']):
+            unavailable['builtin'] = 'This Pi has no built-in Bluetooth.'
+        for a in st['adapters']:
+            if not a['usb']:
+                continue
+            d = devs.get(a['usb'])
+            label = d['label'] if d else a['usb']
+            options.append((a['address'], a['name'], 'Plugged into %s. Its Bluetooth address is %s.'
+                            % (label, a['address']), label))
+            if sharing and d and d.get('goes'):
+                unavailable[a['address']] = ('USB sharing sends it to your PC while you stream (%s). To use it '
+                                             'here, set it to Never in Settings → USB sharing → Devices.' % d['why'])
+        choice = st['choice']
+        if choice and not st['adapter']:
+            seen = usb_sharing.load_seen().get(choice.get('key')) or {}
+            options.append((choice['address'], seen.get('name') or 'Your USB adapter',
+                            'Its Bluetooth address is %s.' % choice['address'], ''))
+            unavailable[choice['address']] = "It isn't plugged in."
+        self.options, self.unavailable, self.state = options, unavailable, st
+        self.current = self.initial = choice.get('address') or 'builtin'
+        self.loaded = True
+        self.refresh()
+
+    def refresh(self):
+        if not self.loaded:
+            self.list.set_items([Item('Looking for adapters…', selectable=False, spinner=True)])
+            return
+        super().refresh()
+
+    def _pick(self, value):
+        app = self.app
+        if value == self.current:
+            app.pop()
+            return
+        a = next((a for a in self.state['adapters'] if a['address'] == value and a['usb']), None)
+        name = a['name'] if a else 'the built-in Bluetooth'
+        app.confirm('Use %s?' % name, "Controllers paired with the Pi's current adapter won't connect until you "
+                    'pair them again with this one.' + (" The Pi's built-in Bluetooth is switched off while you "
+                                                       'use it.' if a else ''),
+                    'Use it', lambda: self._switch(a, name))
+
+    def _switch(self, a, name):
+        app = self.app
+
+        def work():
+            if a:
+                settings.bt_adapter(a['address'], a['key'])
+            else:
+                settings.bt_adapter('builtin')
+            # The adapter takes a moment to come on once it's switched on.
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    return app.bt.ensure_powered()
+                except bluetooth.BluetoothError:
+                    if time.monotonic() > deadline:
+                        raise
+                    time.sleep(0.5)
+
+        def done(res, err):
+            app.poll_now()
+            if err:
+                app.message("Couldn't switch adapters", str(err))
+                return
+            app.show_toast('Controllers now use %s' % name, GOOD)
+            app.pop()
+            app.push(PairScreen(app))
+        app.run_task(work, done, busy='Switching to %s…' % name)
 
 
 class PairScreen(ListScreen):
