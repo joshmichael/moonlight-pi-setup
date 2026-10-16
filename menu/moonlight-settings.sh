@@ -14,8 +14,11 @@
 # Run as root (sudo):
 #   init USER                    remember which user the Pi is set up for
 #   quit-on-shutdown on|off      end the stream on the PC when the Pi shuts down
-#   usb-handoff on|off           VirtualHere sends USB devices to the PC only while streaming
-#   virtualhere-tailscale on|off allow VirtualHere over Tailscale (off: blocked)
+#   usb-sharing on|off           send USB devices plugged into the Pi to the PC while streaming
+#   usb-tailscale on|off         let USB sharing work over Tailscale (off: home network only)
+#   usb-device ID always|never|auto
+#                                what a device (ID: vendor:product) does; auto goes by its type
+#   usb-port PORT on|off         send anything plugged into a port (PORT: e.g. 1-1, or 1-1.3 on a hub)
 #   quiet-boot on|off            hide boot messages (after a restart)
 #   wifi-powersave on|off        Wi-Fi power saving
 #   wifi-country XX              Wi-Fi country (two letters)
@@ -23,7 +26,7 @@
 #   updates check|install        Moonlight and system updates (apt)
 #   update-setup                 download the latest moonlight-pi-setup and run it
 #   uninstall none|LIST          uninstall the setup, then restart the Pi. LIST also
-#                                removes any of: moonlight,tailscale,virtualhere
+#                                removes any of: moonlight,tailscale
 #
 set -Eeuo pipefail
 umask 022
@@ -33,6 +36,7 @@ RAW_SCRIPT_URL="https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup
 TAILSCALE_INSTALL_SCRIPT="https://tailscale.com/install.sh"
 
 LIB_DIR="/usr/local/lib/moonlight-pi-setup"
+MENU_DIR="${LIB_DIR}/menu"
 ROOT_STATE_DIR="/var/lib/moonlight-pi-setup"
 ROOT_STATE="${ROOT_STATE_DIR}/state"
 BACKUP_DIR="${ROOT_STATE_DIR}/backups"
@@ -43,14 +47,10 @@ NM_WIFI_CONF="/etc/NetworkManager/conf.d/90-moonlight-pi-setup-wifi.conf"
 QUIT_HELPER="/usr/local/bin/moonlight-quit-all"
 QUIT_SERVICE_NAME="moonlight-quit-on-shutdown.service"
 QUIT_SERVICE="/etc/systemd/system/${QUIT_SERVICE_NAME}"
-VH_SERVICE_NAME="virtualhere.service"
-VH_CONFIG="/usr/local/etc/virtualhere/config.ini"
-HANDOFF_HELPER="/usr/local/bin/moonlight-usb-handoff"
-HANDOFF_SERVICE_NAME="moonlight-usb-handoff.service"
-HANDOFF_SERVICE="/etc/systemd/system/${HANDOFF_SERVICE_NAME}"
-VH_TS_SERVICE_NAME="moonlight-virtualhere-tailscale.service"
-VH_TS_SERVICE="/etc/systemd/system/${VH_TS_SERVICE_NAME}"
-VH_TS_RULES="${ROOT_STATE_DIR}/virtualhere-tailscale.nft"
+USB_SERVICE_NAME="moonlight-usb-sharing.service"
+USB_SERVICE="/etc/systemd/system/${USB_SERVICE_NAME}"
+USB_MODULES="/etc/modules-load.d/moonlight-usb-sharing.conf"
+USB_CONFIG="${ROOT_STATE_DIR}/usb-sharing.conf"
 COUNTRIES="/usr/share/zoneinfo/iso3166.tab"
 
 MARK_BEGIN="# >>> moonlight-pi-setup >>>"
@@ -158,12 +158,6 @@ package_installed() {
   [[ $(dpkg-query -W -f='${Status}' "$1" 2> /dev/null) == "install ok installed" ]]
 }
 
-virtualhere_installed() {
-  local units
-  units=$(systemctl list-unit-files 2> /dev/null || true)
-  grep -qi virtualhere <<<"$units"
-}
-
 wifi_ifaces() {
   local d
   for d in /sys/class/net/*/wireless; do
@@ -176,16 +170,12 @@ wifi_country() {
   grep -o 'cfg80211.ieee80211_regdom=[A-Z]*' "$CMDLINE_FILE" 2> /dev/null | head -n1 | cut -d= -f2 || true
 }
 
-# installed_by_setup tailscale|virtualhere <user state file>: installed, and by
-# the setup. The setup script records that in the user's state file, and this
+# tailscale_by_setup <user state file>: Tailscale is installed, and by the
+# setup. The setup script records that in the user's state file, and this
 # helper in its own when the menu installs Tailscale.
-installed_by_setup() {
-  local key="${1}_installed_by_script"
-  case "$1" in
-    tailscale) command -v tailscale > /dev/null || return 1 ;;
-    *) virtualhere_installed || return 1 ;;
-  esac
-  recorded "$2" "$key" || recorded "$ROOT_STATE" "$key"
+tailscale_by_setup() {
+  command -v tailscale > /dev/null || return 1
+  recorded "$1" tailscale_installed_by_script || recorded "$ROOT_STATE" tailscale_installed_by_script
 }
 
 # ---------------------------------------------------------------------------
@@ -205,20 +195,18 @@ cmd_status() {
   fi
   say "speakers=${speakers}"
   say "quit_on_shutdown=$(flag service_enabled "$QUIT_SERVICE_NAME")"
-  say "virtualhere=$(flag virtualhere_installed)"
-  say "usb_handoff=$(flag service_enabled "$HANDOFF_SERVICE_NAME")"
-  say "vh_tailscale=$(flag recorded "$ROOT_STATE" vh_tailscale)"
-  say "vh_port=$(vh_port)"
+  say "usbip=$(flag command -v usbipd)"
+  say "usb_sharing=$(flag service_enabled "$USB_SERVICE_NAME")"
+  say "usb_tailscale=$(flag recorded "$USB_CONFIG" tailscale)"
   say "quiet_boot=$(flag grep -qsF "$MARK_BEGIN" "$CONFIG_TXT")"
   say "wifi=$(flag compgen -G '/sys/class/net/*/wireless')"
   say "wifi_powersave=$(flag test ! -f "$NM_WIFI_CONF")"
   say "wifi_country=$(wifi_country)"
   say "tailscale=$(flag command -v tailscale)"
-  # What the uninstall can also remove: Moonlight, and Tailscale and VirtualHere
-  # if the setup installed them.
+  # What the uninstall can also remove: Moonlight, and Tailscale if the setup
+  # installed it.
   say "moonlight_installed=$(flag package_installed moonlight-qt)"
-  say "tailscale_by_setup=$(flag installed_by_setup tailscale "$ustate")"
-  say "virtualhere_by_setup=$(flag installed_by_setup virtualhere "$ustate")"
+  say "tailscale_by_setup=$(flag tailscale_by_setup "$ustate")"
 }
 
 # ---------------------------------------------------------------------------
@@ -473,180 +461,97 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# usb-handoff
+# usb-sharing, usb-tailscale, usb-device, usb-port
 # ---------------------------------------------------------------------------
-# VirtualHere goes back to sharing devices all the time.
-usb_handoff_off() {
-  if [[ -f $HANDOFF_SERVICE ]]; then
-    systemctl disable --now "$HANDOFF_SERVICE_NAME" > /dev/null 2>&1 || true
-    rm -f "$HANDOFF_SERVICE"
-    systemctl daemon-reload
-  fi
-  if [[ -f $HANDOFF_HELPER ]] && grep -q "moonlight-pi-setup" "$HANDOFF_HELPER"; then
-    rm -f "$HANDOFF_HELPER"
-  fi
-  if [[ $(kv_get "$ROOT_STATE" vh_disabled_by_handoff) == 1 ]]; then
-    systemctl enable --now "$VH_SERVICE_NAME" > /dev/null 2>&1 || true
-    root_set vh_disabled_by_handoff 0
-  fi
-  say "VirtualHere sends USB devices to your PC all the time"
+# USB sharing sends USB devices plugged into the Pi to the gaming PC while
+# Moonlight is streaming, with USB/IP. Its service (usb_sharing.py, in the
+# menu's folder) watches Moonlight, runs usbipd and keeps its firewall rules.
+# Its settings are in USB_CONFIG, which the service reads every second.
+
+# usb_conf_set <key> [value]: set a USB sharing setting, or remove it.
+usb_conf_set() {
+  local key=$1 value=${2:-}
+  install -d -m 755 "$ROOT_STATE_DIR"
+  touch "$USB_CONFIG"
+  {
+    awk -F= -v k="$key" '$1 != k' "$USB_CONFIG"
+    [[ -z $value ]] || printf '%s=%s\n' "$key" "$value"
+  } > "${USB_CONFIG}.tmp"
+  chmod 644 "${USB_CONFIG}.tmp"
+  mv "${USB_CONFIG}.tmp" "$USB_CONFIG"
 }
 
-# Share USB devices with the PC only while streaming. A watcher starts the
-# VirtualHere server when a stream starts and stops it when the stream ends,
-# which hands the devices back to the Pi.
-usb_handoff_on() {
-  virtualhere_installed || die "VirtualHere isn't installed."
-  systemctl cat "$VH_SERVICE_NAME" > /dev/null 2>&1 || die "The VirtualHere service (${VH_SERVICE_NAME}) wasn't found."
-  # The VirtualHere installer leaves its config writable by every user, but the
-  # server runs as root.
-  if [[ -f $VH_CONFIG ]]; then
-    chmod 644 "$VH_CONFIG"
-  fi
-
-  cat > "$HANDOFF_HELPER" <<'EOF'
-#!/usr/bin/env bash
-# Installed by moonlight-pi-setup.
-# Shares USB devices with the gaming PC only while Moonlight is streaming.
-# Watches the Moonlight log, starts the VirtualHere server when a stream
-# starts, and stops it when the stream ends, which gives the devices back to
-# the Pi. A controller plugged into the Pi then works in Moonlight's menus
-# between streams, and on the PC (through the VirtualHere client's Auto-Use)
-# during a stream.
-LOG=/tmp/moonlight.log
-VH=virtualhere.service
-streaming=0
-
-start_sharing() {
-  streaming=1
-  echo "Stream started: sharing USB devices with the PC"
-  systemctl start "$VH"
-}
-
-stop_sharing() {
-  streaming=0
-  echo "Stream ended ($1): giving USB devices back to the Pi"
-  systemctl stop "$VH"
-}
-
-# Pick up where things are, in case this service restarted mid-stream.
-last=$(grep -aE 'Starting video stream|Stopping video stream' "$LOG" 2>/dev/null | tail -n 1)
-if [[ $last == *"Starting video stream"* ]] && pgrep -x moonlight-qt > /dev/null; then
-  start_sharing
-else
-  systemctl stop "$VH"
-  echo "Waiting for a stream to start"
-fi
-
-# tail -F keeps following the log when Moonlight restarts and rewrites it.
-while true; do
-  IFS= read -r -t 5 line
-  rc=$?
-  if (( rc == 0 )); then
-    case $line in
-      *"Starting video stream"*)
-        (( streaming )) || start_sharing ;;
-      *"Stopping video stream"*)
-        if (( streaming )); then stop_sharing "stream closed"; fi ;;
-      *"file truncated"*|*"has been replaced"*)
-        if (( streaming )); then stop_sharing "Moonlight restarted"; fi ;;
-    esac
-  elif (( rc > 128 )); then
-    # No new log lines for 5 seconds: check Moonlight hasn't closed mid-stream.
-    if (( streaming )) && ! pgrep -x moonlight-qt > /dev/null; then
-      stop_sharing "Moonlight closed"
-    fi
-  else
-    exit 1   # tail stopped; systemd restarts this service
-  fi
-done < <(tail -n 0 -F "$LOG" 2>&1)
-EOF
-  chmod 755 "$HANDOFF_HELPER"
-
-  cat > "$HANDOFF_SERVICE" <<EOF
+usb_sharing_on() {
+  command -v usbipd > /dev/null || die "USB/IP isn't installed (the usbip package). Run the setup script again."
+  command -v nft > /dev/null || die "nftables isn't installed (sudo apt install nftables)."
+  [[ -f ${MENU_DIR}/usb_sharing.py ]] || die "USB sharing isn't installed. Run the setup script again."
+  printf '%s\n%s\n' "# Installed by moonlight-pi-setup: USB sharing" "usbip-host" > "$USB_MODULES"
+  modprobe usbip-host || die "Couldn't load the usbip-host driver."
+  cat > "$USB_SERVICE" <<EOF
 # Installed by moonlight-pi-setup.
 [Unit]
-Description=Share USB devices with the gaming PC only while Moonlight is streaming
-After=${VH_SERVICE_NAME}
+Description=Send USB devices plugged into the Pi to the gaming PC while Moonlight is streaming
+After=network.target
 
 [Service]
-ExecStart=${HANDOFF_HELPER}
+ExecStart=/usr/bin/python3 ${MENU_DIR}/usb_sharing.py serve
+RuntimeDirectory=moonlight-usb-sharing
 Restart=always
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
-  # From now on the hand-off service decides when the VirtualHere server runs.
-  if service_enabled "$VH_SERVICE_NAME"; then
-    systemctl disable "$VH_SERVICE_NAME" > /dev/null 2>&1
-    root_set vh_disabled_by_handoff 1
-  fi
   systemctl daemon-reload
-  systemctl enable "$HANDOFF_SERVICE_NAME" > /dev/null 2>&1
-  systemctl restart "$HANDOFF_SERVICE_NAME"
-  say "VirtualHere sends USB devices to your PC only while you're streaming"
+  systemctl enable "$USB_SERVICE_NAME" > /dev/null 2>&1
+  systemctl restart "$USB_SERVICE_NAME"
+  say "USB devices plugged into the Pi go to your PC while you're streaming"
 }
 
-# ---------------------------------------------------------------------------
-# virtualhere-tailscale
-# ---------------------------------------------------------------------------
-# VirtualHere's server listens on every network, including Tailscale. Unless
-# this is turned on, a firewall rule blocks its port on the Tailscale network,
-# so only PCs at home can use the Pi's USB devices.
-vh_port() {
-  local port
-  port=$(grep -im1 '^TCPPort=' "$VH_CONFIG" 2> /dev/null | cut -d= -f2 | tr -dc '0-9' || true)
-  printf '%s' "${port:-7575}"
-}
-
-virtualhere_tailscale_off() {
-  command -v nft > /dev/null || die "nftables isn't installed (sudo apt install nftables)."
-  install -d -m 755 "$ROOT_STATE_DIR"
-  cat > "$VH_TS_RULES" <<EOF
-# Installed by moonlight-pi-setup: keep VirtualHere off the Tailscale network.
-table inet moonlight_virtualhere
-delete table inet moonlight_virtualhere
-table inet moonlight_virtualhere {
-  chain input {
-    type filter hook input priority filter; policy accept;
-    iifname "tailscale0" tcp dport $(vh_port) drop
-  }
-}
-EOF
-  cat > "$VH_TS_SERVICE" <<EOF
-# Installed by moonlight-pi-setup.
-[Unit]
-Description=Keep VirtualHere off the Tailscale network
-Before=tailscaled.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=$(command -v nft) -f ${VH_TS_RULES}
-ExecStop=$(command -v nft) delete table inet moonlight_virtualhere
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload
-  systemctl enable "$VH_TS_SERVICE_NAME" > /dev/null 2>&1
-  systemctl restart "$VH_TS_SERVICE_NAME"
-  root_set vh_tailscale 0
-  say "VirtualHere only works at home (not over Tailscale)"
-}
-
-virtualhere_tailscale_on() {
-  if [[ -f $VH_TS_SERVICE ]]; then
-    systemctl disable --now "$VH_TS_SERVICE_NAME" > /dev/null 2>&1 || true
-    rm -f "$VH_TS_SERVICE"
+# Stopping the service gives any shared devices back to the Pi.
+usb_sharing_off() {
+  if [[ -f $USB_SERVICE ]]; then
+    systemctl disable --now "$USB_SERVICE_NAME" > /dev/null 2>&1 || true
+    rm -f "$USB_SERVICE"
     systemctl daemon-reload
   fi
-  nft delete table inet moonlight_virtualhere 2> /dev/null || true
-  rm -f "$VH_TS_RULES"
-  root_set vh_tailscale 1
-  say "VirtualHere works over Tailscale too"
+  rm -f "$USB_MODULES"
+  say "USB devices plugged into the Pi stay on the Pi"
+}
+
+usb_tailscale_on() {
+  usb_conf_set tailscale 1
+  say "USB sharing works over Tailscale too"
+}
+
+usb_tailscale_off() {
+  usb_conf_set tailscale
+  say "USB sharing only works on your home network (not over Tailscale)"
+}
+
+USB_DEVICE_USAGE="Use: usb-device VENDOR:PRODUCT always|never|auto"
+USB_PORT_USAGE="Use: usb-port PORT on|off (PORT is like 1-1, or 1-1.3 for a port on a hub)"
+
+cmd_usb_device() {
+  local id=${1,,} rule=${2:-}
+  [[ $id =~ ^[0-9a-f]{4}:[0-9a-f]{4}$ ]] || die "$USB_DEVICE_USAGE"
+  case "$rule" in
+    always|never) usb_conf_set "device.${id}" "$rule" ;;
+    auto) usb_conf_set "device.${id}" ;;
+    *) die "$USB_DEVICE_USAGE" ;;
+  esac
+  say "Device ${id}: ${rule}"
+}
+
+cmd_usb_port() {
+  local port=${1:-} value=${2:-}
+  [[ $port =~ ^[0-9]{1,3}-[0-9]{1,3}(\.[0-9]{1,3}){0,6}$ ]] || die "$USB_PORT_USAGE"
+  case "$value" in
+    on) usb_conf_set "port.${port}" on ;;
+    off) usb_conf_set "port.${port}" ;;
+    *) die "$USB_PORT_USAGE" ;;
+  esac
+  say "Port ${port}: ${value}"
 }
 
 # ---------------------------------------------------------------------------
@@ -859,8 +764,8 @@ cmd_uninstall() {
   for item in "${items[@]}"; do
     case "$item" in
       none) ;;
-      moonlight|tailscale|virtualhere) args+=("--remove-${item}") ;;
-      *) die "Use: uninstall none, or any of moonlight,tailscale,virtualhere" ;;
+      moonlight|tailscale) args+=("--remove-${item}") ;;
+      *) die "Use: uninstall none, or any of moonlight,tailscale" ;;
     esac
   done
   [[ -f $script ]] || die "The setup script isn't installed (${script})."
@@ -874,18 +779,19 @@ cmd_uninstall() {
 
 # ---------------------------------------------------------------------------
 main() {
-  local cmd=${1:-} value=${2:-}
+  local cmd=${1:-} value=${2:-} extra=${3:-}
   case "$cmd" in
     status) cmd_status ;;
     speakers) cmd_speakers "$value" ;;
     init) require_root; lock; cmd_init "$value" ;;
-    quit-on-shutdown|usb-handoff|virtualhere-tailscale|quiet-boot|wifi-powersave)
+    quit-on-shutdown|usb-sharing|usb-tailscale|quiet-boot|wifi-powersave)
       require_root
       [[ $value == on || $value == off ]] || die "Use: ${cmd} on|off"
       lock
       load_user
       "${cmd//-/_}_${value}"
       ;;
+    usb-device|usb-port) require_root; lock; "cmd_${cmd//-/_}" "$value" "$extra" ;;
     wifi-country) require_root; lock; cmd_wifi_country "$value" ;;
     tailscale) require_root; cmd_tailscale "$value" ;;
     updates) require_root; lock; cmd_updates "$value" ;;
