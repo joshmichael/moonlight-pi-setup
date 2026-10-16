@@ -165,6 +165,7 @@ $lastFind = @{}        # Pi -> when we last looked for it
 $reachable = @{}       # Pi -> the address it last answered on
 $lastTailscale = [datetime]::MinValue
 $warnedNoUsbip = $false
+$mine = @{}            # "address/busid" of the devices this helper attached
 
 while ($true) {
     if (-not (Test-Path -LiteralPath $Usbip)) {
@@ -194,6 +195,14 @@ while ($true) {
     }
 
     $attached = Get-AttachedDevices
+    # A device the Pi took back (the stream ended): usbip-win2 would keep trying
+    # to attach it again by itself, so stop that.
+    foreach ($gone in @($mine.Keys | Where-Object { $attached -notcontains $_ })) {
+        $addr, $id = $gone -split '/', 2
+        Invoke-Usbip @('attach', '-r', $addr, '-b', $id, '--stop') | Out-Null
+        $mine.Remove($gone)
+        Write-Log "Device $id went back to the Pi"
+    }
     foreach ($pi in $pis) {
         $key = "$($pi.name)|$($pi.mac)"
         $answered = $null
@@ -208,6 +217,7 @@ while ($true) {
                 if ($attached -contains "$addr/$id") { continue }
                 $rc, $out = Invoke-Usbip @('attach', '-r', $addr, '-b', $id, '--once')
                 Write-Log "Device $id from $($pi.name) ($addr): $($out.Trim())"
+                if ($rc -eq 0) { $mine["$addr/$id"] = $true }
             }
             break
         }

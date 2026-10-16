@@ -40,6 +40,7 @@ $HelperName = 'moonlight-usb-helper.ps1'
 $HelperPath = Join-Path $AppDir $HelperName
 $ConfigPath = Join-Path $AppDir 'usb-sharing.json'
 $HelperLog = Join-Path $AppDir 'usb-helper.log'
+$InstalledMarker = Join-Path $AppDir 'installed-usbip-win2'    # this setup installed usbip-win2
 $StartupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Moonlight Pi USB sharing.lnk'
 $Conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
 $PowerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -117,17 +118,28 @@ function Test-WindowsVersion {
     }
 }
 
+# Whether version $A is at least $B (False if either isn't a version number).
+function Test-VersionAtLeast([string]$A, [string]$B) {
+    try { return [version]$A -ge [version]$B } catch { return $false }
+}
+
+# Other programs can install usbip-win2 too (Vibepollo uses it for its DualSense
+# emulation), so one that's already there is only ever updated, never replaced
+# by an older version, and only with your OK.
 function Install-Usbip {
     $current = Get-UsbipInstalledVersion
-    if ($current -eq $UsbipVersion) {
-        Write-Ok "usbip-win2 $UsbipVersion is installed"
-        return
+    if ($current -and (Test-Path -LiteralPath $UsbipExe)) {
+        if (Test-VersionAtLeast $current $UsbipVersion) {
+            Write-Ok "usbip-win2 $current is installed"
+            return
+        }
+        Write-Info "usbip-win2 $current is installed. USB sharing is tested with $UsbipVersion."
+        if (-not (Read-YesNo "Update usbip-win2 to $UsbipVersion?" $true)) {
+            throw "USB sharing needs usbip-win2 $UsbipVersion or newer."
+        }
     }
     $arch = Get-WindowsArchitecture
     $pkg = $UsbipInstallers[$arch]
-    if ($current) {
-        Write-Info "usbip-win2 $current is installed; this setup is tested with $UsbipVersion, so it updates it."
-    }
     Write-Info "Downloading usbip-win2 $UsbipVersion ($arch) from GitHub..."
     $tmp = Join-Path $env:TEMP "USBip-$UsbipVersion-$arch.exe"
     Invoke-WebRequest -Uri $pkg.Url -OutFile $tmp -UseBasicParsing
@@ -151,8 +163,22 @@ function Install-Usbip {
     if ($p.ExitCode -ne 0 -or (Get-UsbipInstalledVersion) -ne $UsbipVersion) {
         throw "usbip-win2 didn't install (exit code $($p.ExitCode)). Its log is at $log"
     }
+    New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+    Set-Content -LiteralPath $InstalledMarker -Value 'usbip-win2 was installed by the moonlight-pi-setup PC setup.'
     $script:RestartNeeded = $true
     Write-Ok "Installed usbip-win2 $UsbipVersion"
+}
+
+# Programs other than this setup that use usbip-win2 (their folders), such as
+# Vibepollo, which bundles its drivers.
+function Get-OtherUsbipUsers {
+    @(Get-ChildItem -Path "$env:ProgramFiles\*\drivers\usbip-win2" -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $root = $_.Parent.Parent
+            $product = Get-ChildItem -LiteralPath $root.FullName -Filter *.exe -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.VersionInfo.ProductName } | Where-Object { $_ } | Select-Object -First 1
+            if ($product) { $product } else { $root.Name }
+        })
 }
 
 function Uninstall-Usbip {
@@ -438,11 +464,20 @@ function Install-Helper {
 
 function Remove-UsbSharing {
     Write-Step 'Removing USB sharing from this PC'
+    $installedHere = Test-Path -LiteralPath $InstalledMarker
     Stop-Helper
     Remove-Item -LiteralPath $StartupLink -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $AppDir) { Remove-Item -LiteralPath $AppDir -Recurse -Force }
     Write-Ok 'Removed the USB sharing helper'
-    Uninstall-Usbip
+    if (-not (Get-UsbipInstalledVersion)) { return }
+    $others = Get-OtherUsbipUsers
+    if (-not $installedHere) {
+        Write-Info "usbip-win2 was on this PC before USB sharing was set up, so it's left installed."
+    } elseif ($others) {
+        Write-Info "usbip-win2 stays installed, because $($others -join ' and ') uses it too."
+    } else {
+        Uninstall-Usbip
+    }
 }
 
 # Waits for the helper to reach the Pi (it logs when it does).

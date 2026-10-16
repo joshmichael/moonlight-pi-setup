@@ -141,6 +141,7 @@ Notes:
 
 - During a stream the controller is on the PC, so Moonlight's controller shortcut can't end it. **Quit the game on the PC** (for example, exit Steam Big Picture), or press Ctrl+Alt+Shift+Q on a keyboard plugged into the Pi.
 - Bluetooth controllers always stay with the Pi, because the Pi's built-in Bluetooth isn't a USB device. For full DualSense features on the PC, use a USB cable.
+- **Vibepollo** also uses usbip-win2, for its DualSense emulation: a controller that stays on the Pi still shows up on the PC as an emulated DualSense, through Moonlight. That's Moonlight's normal controller support, not USB sharing. Removing USB sharing from the PC leaves usbip-win2 installed when another program uses it.
 - Some devices don't work with usbip-win2, for example a PowerA wired Xbox Series X controller ([vadimgrn/usbip-win2#170](https://github.com/vadimgrn/usbip-win2/issues/170)). The usbip-win2 wiki lists [devices known to work](https://github.com/vadimgrn/usbip-win2/wiki).
 - What it's doing: on the Pi, `journalctl -u moonlight-usb-sharing --no-pager`; on the PC, `%LOCALAPPDATA%\Programs\moonlight-pi-setup\usb-helper.log`.
 
