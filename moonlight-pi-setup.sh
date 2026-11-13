@@ -15,7 +15,7 @@
 #
 set -Eeuo pipefail
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.1.0"
 
 REPO_URL="https://github.com/joshmichael/moonlight-pi-setup"
 ISSUES_URL="${REPO_URL}/issues"

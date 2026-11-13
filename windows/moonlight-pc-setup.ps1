@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'      # Windows PowerShell downloads slowly while showing progress
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$PcSetupVersion = '2.0.0'
+$PcSetupVersion = '2.1.0'
 $IssuesUrl = 'https://github.com/joshmichael/moonlight-pi-setup/issues'
 $RawUrl = 'https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main'
 

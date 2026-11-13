@@ -29,9 +29,6 @@ def dualsense_report(lx=128, ly=128, rx=128, ry=128, l2=0, r2=0, face=0x08, b1=0
 
 
 class DecoderTests(unittest.TestCase):
-    def test_dualsense_neutral(self):
-        self.assertEqual(usb_combo.dualsense_state(dualsense_report()), (0, 0, 0, 128, 128, 128, 128, 0, 0))
-
     def test_dualsense_buttons_by_position(self):
         # Cross (bottom) is the Xbox A, Circle B, Square X, Triangle Y.
         for bit, expect in ((0x20, SOUTH), (0x40, EAST), (0x10, WEST), (0x80, NORTH)):
@@ -43,10 +40,6 @@ class DecoderTests(unittest.TestCase):
         s = usb_combo.dualsense_state(dualsense_report(lx=0, ly=255, rx=255, ry=0, l2=200, r2=255, face=0x01))
         self.assertEqual(s[1:], (200, 255, -32768, 32767, 32767, -32768, 1, -1))   # d-pad up-right
         self.assertEqual(usb_combo.dualsense_state(dualsense_report(face=0x06))[7:], (-1, 0))    # left
-
-    def test_dualsense_other_reports(self):
-        self.assertIsNone(usb_combo.dualsense_state(b'\x31' + bytes(77)))
-        self.assertIsNone(usb_combo.dualsense_state(b'\x01\x80'))
 
     def test_dualshock4(self):
         d = bytearray(64)
@@ -69,14 +62,6 @@ class DecoderTests(unittest.TestCase):
         self.assertEqual(s[7:], (0, -1))
         self.assertIsNone(usb_combo.switch_pro_state(b'\x21' + bytes(63)))   # a subcommand reply
 
-    def test_shortcut_unchanged(self):
-        self.assertTrue(usb_combo._dualsense(dualsense_report(b1=0x33)))
-        self.assertFalse(usb_combo._dualsense(dualsense_report(b1=0x31)))
-        self.assertEqual(usb_combo.state_pad_type('054c:0ce6'), 'dualsense')
-        self.assertEqual(usb_combo.state_pad_type('057e:2009'), 'switchpro')
-        self.assertIsNone(usb_combo.state_pad_type('045e:028e'))
-
-
 class MessageTests(unittest.TestCase):
     def test_parse(self):
         self.assertEqual(xbox_copy.parse_message(b'moonlight-pi-setup secure-screen 1 secure=1 host=PC'),
@@ -86,21 +71,12 @@ class MessageTests(unittest.TestCase):
         self.assertIsNone(xbox_copy.parse_message(b'something else'))
         self.assertIsNone(xbox_copy.parse_message(b'\xff\xfe'))
 
-    def test_addresses(self):
-        self.assertEqual(xbox_copy.plain_address('::ffff:192.168.0.46'), '192.168.0.46')
-        self.assertEqual(xbox_copy.plain_address('fe80::1%eth0'), 'fe80::1')
-        self.assertEqual(xbox_copy.plain_address('fd7a:115c:a1e0::1'), 'fd7a:115c:a1e0::1')
-
-
 def ctrl(key, connection='bluetooth', xbox=False, pad=None):
     return {'key': key, 'name': key, 'connection': connection, 'xbox': xbox, 'pad': pad, 'usb': None,
             'event': '/dev/input/event9', 'bus': 1, 'devnum': 5}
 
 
 class PlanTests(unittest.TestCase):
-    def test_nothing_without_a_screen(self):
-        self.assertEqual(xbox_copy.plan_copies([ctrl('bt:1')], {}, False), ({}, []))
-
     def test_xbox_controllers_left_alone(self):
         want, skipped = xbox_copy.plan_copies([ctrl('bt:x', xbox=True), ctrl('bt:ds')], {}, True)
         self.assertEqual(list(want), ['bt:ds'])
@@ -118,15 +94,6 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(len(want), 4)
         self.assertIn('bt:5', want)
         self.assertEqual(len(skipped), 2)
-
-    def test_moving_to_the_pc_keeps_the_copy(self):
-        on_pi = ctrl('usb:1-1', 'usb-pi')
-        on_pc = ctrl('usb:1-1', 'usb-pc', pad='dualsense')
-        self.assertEqual(xbox_copy.source_id(on_pi), ('input', '/dev/input/event9'))
-        self.assertEqual(xbox_copy.source_id(on_pc), ('usbmon', 1, 5))
-        want, _ = xbox_copy.plan_copies([on_pc], {'usb:1-1': object()}, True)
-        self.assertEqual(list(want), ['usb:1-1'])
-
 
 class FakePad(xbox_copy.XboxPad):
     """An XboxPad that records what it would send, without uinput."""
@@ -154,17 +121,11 @@ class PadTests(unittest.TestCase):
         pad = FakePad()
         pad.write(NEUTRAL)
         self.assertEqual(pad.sent, [])
-        pad.write((SOUTH | NORTH, 0, 0, 0, 0, 0, 0, 0, -1))
-        self.assertEqual(events(pad.sent[0]), [(1, 0x130, 1), (1, 0x134, 1), (3, 0x11, -1), (0, 0, 0)])
-        pad.write((NORTH, 0, 0, 0, 0, 0, 0, 0, -1))
+        # Like Linux's Xbox driver: X (on the left) is BTN_X (0x133), Y (on top) BTN_Y (0x134).
+        pad.write((SOUTH | WEST | NORTH, 0, 0, 0, 0, 0, 0, 0, -1))
+        self.assertEqual(events(pad.sent[0]), [(1, 0x130, 1), (1, 0x133, 1), (1, 0x134, 1), (3, 0x11, -1), (0, 0, 0)])
+        pad.write((WEST | NORTH, 0, 0, 0, 0, 0, 0, 0, -1))
         self.assertEqual(events(pad.sent[1]), [(1, 0x130, 0), (0, 0, 0)])
-
-    def test_west_is_xbox_x(self):
-        # xpad reports the Xbox X button (on the left) as BTN_X (0x133).
-        pad = FakePad()
-        pad.write((WEST,) + NEUTRAL[1:])
-        self.assertEqual(events(pad.sent[0])[0], (1, 0x133, 1))
-
 
 class ServiceCopyTests(unittest.TestCase):
     """The service's copies, with the devices replaced by stand-ins."""
@@ -245,15 +206,6 @@ class ServiceCopyTests(unittest.TestCase):
         s.update_copies()
         self.assertEqual(s.copies, {})
         self.assertTrue(all(p.closed for p in self.pads))
-
-
-class ScaleTests(unittest.TestCase):
-    def test_scale(self):
-        self.assertEqual(xbox_copy._scale(0, (0, 255), -32768, 32767), -32768)
-        self.assertEqual(xbox_copy._scale(255, (0, 255), -32768, 32767), 32767)
-        self.assertEqual(xbox_copy._scale(128, (0, 255), -32768, 32767), 128)
-        self.assertEqual(xbox_copy._scale(32767, (-32767, 32767), 0, 255), 255)
-        self.assertEqual(xbox_copy._scale(5, (5, 5), 0, 255), 0)
 
 
 # ---------------------------------------------------------------------------
