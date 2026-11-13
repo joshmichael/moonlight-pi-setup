@@ -5,6 +5,10 @@
 #     controller, come to this PC while you stream, as if they were plugged in
 #     here. Installs usbip-win2 (the Windows side of USB/IP), finds the Pi, and
 #     installs a small helper that starts hidden when you log in.
+#   - Sign-in screens (optional): every controller on the Pi works on Windows'
+#     lock screen, sign-in screen and UAC prompts, which only take Xbox
+#     controllers: while one is up, the Pi adds an Xbox copy of each other
+#     controller. Installs a small Windows service that tells the Pi when.
 #   - Tailscale (optional), to stream when you're away from home.
 #
 # Run it in PowerShell on the gaming PC as your normal user (not as admin):
@@ -44,6 +48,18 @@ $InstalledMarker = Join-Path $AppDir 'installed-usbip-win2'    # this setup inst
 $StartupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Moonlight Pi USB sharing.lnk'
 $Conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
 $PowerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+
+# Sign-in screens: a Windows service, compiled here from its C# source with the
+# compiler that comes with Windows (.NET Framework 4). It runs as SYSTEM, so it
+# and its folders can only be changed by administrators.
+$AgentService = 'MoonlightPiSecureScreens'
+$AgentSourceName = 'moonlight-secure-screen.cs'
+$AgentDir = Join-Path $env:ProgramFiles 'moonlight-pi-setup'
+$AgentExe = Join-Path $AgentDir 'moonlight-secure-screen.exe'
+$AgentDataDir = Join-Path $env:ProgramData 'moonlight-pi-setup'
+$AgentConfig = Join-Path $AgentDataDir 'secure-screen.conf'
+$AgentLog = Join-Path $AgentDataDir 'secure-screen.log'
+$AgentPort = 3241
 
 $TailscaleInstallerUrl = 'https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe'
 $TailscaleSigner = 'Tailscale Inc.'
@@ -555,6 +571,203 @@ function Set-UpUsbSharing {
 }
 
 # ---------------------------------------------------------------------------
+# Sign-in screens
+# ---------------------------------------------------------------------------
+function ConvertTo-Quoted([string]$Text) { return "'" + $Text.Replace("'", "''") + "'" }
+
+# Runs PowerShell commands as administrator (Windows asks for permission once).
+# Returns $true if they finished; otherwise what went wrong is in $script:ElevatedError.
+function Invoke-Elevated([string]$Commands) {
+    $result = Join-Path $env:TEMP ('moonlight-setup-{0}.txt' -f [guid]::NewGuid().ToString('N'))
+    $q = ConvertTo-Quoted $result
+    $script = "`$ErrorActionPreference = 'Stop'`ntry {`n$Commands`nSet-Content -LiteralPath $q -Value 'OK'`n} " +
+              "catch {`nSet-Content -LiteralPath $q -Value `$_.Exception.Message`n}"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+    try {
+        Start-Process -FilePath $PowerShellExe -Verb RunAs -WindowStyle Hidden -Wait `
+            -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded
+    } catch {
+        $script:ElevatedError = "Windows didn't get permission."
+        return $false
+    }
+    $text = 'It stopped before finishing.'
+    if (Test-Path -LiteralPath $result) {
+        $text = "$(Get-Content -LiteralPath $result -Raw)".Trim()
+        Remove-Item -LiteralPath $result -Force -ErrorAction SilentlyContinue
+    }
+    $script:ElevatedError = $text
+    return ($text -eq 'OK')
+}
+
+function Test-TailscaleIp([string]$Address) {
+    return $Address -match '^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.'
+}
+
+# The Pis that answer the sign-in screens' "hello" (UDP port 3241, answered
+# while Controllers > Sign-in screens is on): on the home network, and at the
+# addresses given. Objects with name, address and tailscale.
+function Find-PisByHello([string[]]$Known) {
+    $udp = New-Object System.Net.Sockets.UdpClient(0)
+    $found = @{}
+    try {
+        $udp.EnableBroadcast = $true
+        try { [void]$udp.Client.IOControl(-1744830452, [byte[]](0, 0, 0, 0), $null) } catch {}
+        $udp.Client.ReceiveTimeout = 250
+        $hello = [Text.Encoding]::ASCII.GetBytes('moonlight-pi-setup hello 1')
+        $targets = @(Get-LocalSubnets | ForEach-Object { "$_.255" }) + @($Known | Where-Object { $_ }) + '255.255.255.255'
+        foreach ($t in ($targets | Sort-Object -Unique)) {
+            try { [void]$udp.Send($hello, $hello.Length, $t, $AgentPort) } catch {}
+        }
+        $deadline = (Get-Date).AddMilliseconds(1500)
+        while ((Get-Date) -lt $deadline) {
+            $from = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+            try { $data = $udp.Receive([ref]$from) } catch { continue }
+            $text = [Text.Encoding]::ASCII.GetString($data)
+            $re = '^moonlight-pi-setup pi 1(?: name=([A-Za-z0-9._-]{1,63}))?(?: tailscale=(100\.[0-9.]{3,11}))?\s*$'
+            if ($text -match $re) {
+                $found[$from.Address.ToString()] = [pscustomobject]@{
+                    name = "$($Matches[1])"; address = $from.Address.ToString(); tailscale = "$($Matches[2])" }
+            }
+        }
+    } finally {
+        $udp.Close()
+    }
+    return @($found.Values)
+}
+
+# The Pis the service starts with, the first time (it finds Pis, and keeps
+# their addresses up to date, by itself): USB sharing's, and the ones that
+# answered. Lines of the service's settings file.
+function Get-AgentPis($Answered) {
+    $pis = [ordered]@{}
+    foreach ($pi in @(Read-UsbConfig) + @($Answered)) {
+        $name = ("$($pi.name)" -replace '[^A-Za-z0-9._-]', '-').Trim('-')
+        $pis["$($pi.address)"] = '{0} {1} {2}' -f $(if ($name) { $name } else { $pi.address }), $pi.address,
+            $(if ($pi.tailscale) { $pi.tailscale } else { '-' })
+    }
+    return @($pis.Values)
+}
+
+function Get-AgentSource {
+    $dir = Join-Path $env:TEMP ('moonlight-agent-{0}' -f [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $path = Join-Path $dir $AgentSourceName
+    # From next to this script when it's run from a copy of the project, otherwise from GitHub.
+    $local = if ($PSScriptRoot) { Join-Path $PSScriptRoot $AgentSourceName } else { $null }
+    if ($local -and (Test-Path -LiteralPath $local)) {
+        Copy-Item -LiteralPath $local -Destination $path
+    } else {
+        Invoke-WebRequest -Uri "$RawUrl/windows/$AgentSourceName" -OutFile $path -UseBasicParsing
+    }
+    return $path
+}
+
+function Install-SecureScreenAgent {
+    $source = Get-AgentSource
+    $known = @(Read-UsbConfig | ForEach-Object { $_.address; $_.tailscale } | Where-Object { $_ })
+    $answered = @(Find-PisByHello $known | Where-Object { -not (Test-TailscaleIp $_.address) })
+    $conf = Join-Path (Split-Path -Parent $source) 'secure-screen.conf'
+    $lines = @('# The Moonlight Pis this PC tells about its sign-in and UAC screens:',
+               '# name, home address, Tailscale address (- if none). Kept up to date by the service.')
+    Set-Content -LiteralPath $conf -Value ($lines + @(Get-AgentPis $answered)) -Encoding ASCII
+    Write-Info 'Installing the service (Windows asks for permission)...'
+    $commands = @"
+`$name = $(ConvertTo-Quoted $AgentService)
+`$dir = $(ConvertTo-Quoted $AgentDir)
+`$data = $(ConvertTo-Quoted $AgentDataDir)
+`$exe = $(ConvertTo-Quoted $AgentExe)
+`$cs = Join-Path `$dir $(ConvertTo-Quoted $AgentSourceName)
+`$svc = Get-Service -Name `$name -ErrorAction SilentlyContinue
+if (`$svc -and `$svc.Status -ne 'Stopped') { Stop-Service -Name `$name -Force; `$svc.WaitForStatus('Stopped', '00:00:20') }
+try {
+New-Item -ItemType Directory -Force -Path `$dir | Out-Null
+Copy-Item -LiteralPath $(ConvertTo-Quoted $source) -Destination `$cs -Force
+`$csc = Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) 'csc.exe'
+`$ErrorActionPreference = 'Continue'
+`$out = & `$csc /nologo /optimize /target:exe "/out:`$exe" /r:System.Management.dll /r:System.ServiceProcess.dll `$cs 2>&1 | Out-String
+`$rc = `$LASTEXITCODE
+`$ErrorActionPreference = 'Stop'
+if (`$rc -ne 0) { throw "The service didn't compile: `$out" }
+# Its data folder: only administrators and Windows itself may change it, as the service runs as SYSTEM.
+if (Test-Path -LiteralPath `$data) {
+    `$owner = (Get-Acl -LiteralPath `$data).GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if (`$owner -ne 'S-1-5-32-544' -and `$owner -ne 'S-1-5-18') { Remove-Item -LiteralPath `$data -Recurse -Force }
+}
+New-Item -ItemType Directory -Force -Path `$data | Out-Null
+& icacls.exe `$data /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
+# The folder's own permissions (not inherited from ProgramData, where users may create files)...
+& icacls.exe `$data /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /C /Q | Out-Null
+if (`$LASTEXITCODE -ne 0) { throw "Couldn't protect `$data" }
+# ...which everything in it inherits, and nothing else.
+if (Get-ChildItem -LiteralPath `$data -Force) { & icacls.exe (Join-Path `$data '*') /reset /T /C /Q | Out-Null }
+# The Pis it knows (only the first time: the service keeps the list up to date).
+`$known = Join-Path `$data 'secure-screen.conf'
+if (-not (Test-Path -LiteralPath `$known)) { Copy-Item -LiteralPath $(ConvertTo-Quoted $conf) -Destination `$known }
+if (-not `$svc) {
+    New-Service -Name `$name -BinaryPathName ('"' + `$exe + '"') -DisplayName 'Moonlight Pi secure screens' -StartupType Automatic ``
+        -Description 'Tells your Moonlight Pi when Windows shows its lock, sign-in or UAC screens, so every controller works on them (moonlight-pi-setup).' | Out-Null
+}
+& sc.exe failure `$name reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
+} finally {
+    # Running again even if something above failed (the service that was there before).
+    if (Get-Service -Name `$name -ErrorAction SilentlyContinue) { Start-Service -Name `$name -ErrorAction SilentlyContinue }
+}
+if ((Get-Service -Name `$name).Status -ne 'Running') { throw "The service didn't start." }
+"@
+    $ok = Invoke-Elevated $commands
+    Remove-Item -LiteralPath (Split-Path -Parent $source) -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not $ok) { throw "The sign-in screens service wasn't installed: $script:ElevatedError" }
+    Write-Ok 'Installed the service. It runs from when Windows starts, before anyone signs in.'
+    foreach ($pi in $answered) { Write-Ok "$($pi.name) ($($pi.address)) answered: it's ready" }
+    if (-not $answered) {
+        Write-Warn "No Pi answered on this network. On the TV, check Controllers > Sign-in screens is on:"
+        Write-Warn 'the service finds the Pi by itself once it is.'
+    }
+}
+
+function Remove-SecureScreenAgent {
+    Write-Info 'Removing the service (Windows asks for permission)...'
+    $commands = @"
+`$name = $(ConvertTo-Quoted $AgentService)
+`$svc = Get-Service -Name `$name -ErrorAction SilentlyContinue
+if (`$svc) {
+    if (`$svc.Status -ne 'Stopped') { Stop-Service -Name `$name -Force; `$svc.WaitForStatus('Stopped', '00:00:20') }
+    & sc.exe delete `$name | Out-Null
+}
+foreach (`$d in $(ConvertTo-Quoted $AgentDir), $(ConvertTo-Quoted $AgentDataDir)) {
+    if (Test-Path -LiteralPath `$d) { Remove-Item -LiteralPath `$d -Recurse -Force }
+}
+"@
+    if (Invoke-Elevated $commands) {
+        Write-Ok 'Removed the sign-in screens service'
+    } else {
+        Write-Warn "It wasn't removed: $script:ElevatedError"
+    }
+}
+
+function Set-UpSignInScreens {
+    Write-Step 'Controllers on sign-in screens'
+    if (Get-Service -Name $AgentService -ErrorAction SilentlyContinue) {
+        Write-Info 'Every controller on the Pi works on Windows'' lock, sign-in and UAC screens: this is set up.'
+        $reply = (Read-Host '    Press Enter to check and repair it, or type R to remove it from this PC').Trim().ToLower()
+        if ($reply -in 'r', 'remove') {
+            Remove-SecureScreenAgent
+            return
+        }
+    } else {
+        Write-Info "Windows' lock screen, sign-in screen and UAC prompts only work with Xbox controllers."
+        Write-Info 'With this, every other controller on the Pi (PlayStation, Switch and others) also shows'
+        Write-Info 'up here as an Xbox controller while one of those screens is up during a stream. It'
+        Write-Info 'installs a small Windows service, which needs administrator permission once.'
+        if (-not (Read-YesNo 'Let every controller use these screens?' $true)) {
+            Write-Info 'Skipped. Run this script again any time to set it up.'
+            return
+        }
+    }
+    Install-SecureScreenAgent
+}
+
+# ---------------------------------------------------------------------------
 # Tailscale
 # ---------------------------------------------------------------------------
 function Test-TailscaleInstalled {
@@ -601,6 +814,7 @@ function Invoke-MoonlightPcSetup {
     Write-Host "Moonlight PC Setup $PcSetupVersion (for moonlight-pi-setup)" -ForegroundColor White
     try {
         Set-UpUsbSharing
+        Set-UpSignInScreens
         Install-Tailscale
     } catch {
         Write-Host ''

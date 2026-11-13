@@ -9,8 +9,8 @@ import pygame
 
 import settings
 import ui
-from ui import (W, H, MARGIN, CONTENT_Y, FOOTER_Y, BACK, PANEL, PANEL_HI, ACCENT, TEXT, DIM, FAINT, GOOD, WARN,
-                BAD, Item, ListScreen, Screen, draw_text, draw_wrapped, rrect, dot)
+from ui import (W, H, MARGIN, CONTENT_Y, FOOTER_Y, BACK, BG, PANEL, PANEL_HI, ACCENT, TEXT, DIM, FAINT, GOOD,
+                WARN, BAD, Item, ListScreen, Screen, draw_text, draw_wrapped, rrect, dot)
 
 REPO = 'github.com/joshmichael/moonlight-pi-setup'
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
@@ -471,7 +471,7 @@ class TailscaleScreen(ListScreen):
         ts = self.ts or {}
         y = rect.y
         text, color = tailscale_summary(ts)
-        dot(surf, color or DIM, (rect.x + 10, y + 21), 9)
+        dot(surf, color or DIM, (rect.x + 10, y + ui.font(34, True).get_linesize() // 2 + 1), 9)
         y = draw_text(surf, text, (rect.x + 36, y), 34, TEXT, bold=True).bottom + 20
         running = ts.get('state') == 'Running'
         for label, value in (('Address', ts.get('ip')), ('Account', ts.get('tailnet'))):
@@ -604,30 +604,35 @@ class TailscaleLoginScreen(Screen):
 
     def draw(self, surf):
         left = pygame.Rect(MARGIN, CONTENT_Y, 600, 600)
-        right_x = MARGIN + 680
-        width = W - MARGIN - right_x
-        if self.state == 'error':
-            draw_text(surf, "Couldn't connect to Tailscale", (right_x, CONTENT_Y), 44, TEXT, bold=True)
-            draw_wrapped(surf, self.error, (right_x, CONTENT_Y + 80), width, 32, BAD)
-        elif self.state == 'done':
+        if self.state == 'done':
             ui.tick_mark(surf, left.center)
-            draw_text(surf, 'Tailscale is connected', (right_x, CONTENT_Y), 44, TEXT, bold=True)
-            draw_wrapped(surf, 'You can stream from away from home now.', (right_x, CONTENT_Y + 80), width, 32)
         elif self.state == 'starting':
             ui.spinner(surf, left.center, 50, ACCENT, 10)
-            draw_text(surf, 'Connecting to Tailscale…', (right_x, CONTENT_Y), 44, TEXT, bold=True)
-            draw_wrapped(surf, 'If the Pi needs signing in, a code to scan appears here.', (right_x, CONTENT_Y + 80),
-                         width, 32)
-        else:
+        elif self.state != 'error':
             rrect(surf, ui.WHITE, left, 24)
             if self.qr:
                 surf.blit(self.qr, self.qr.get_rect(center=left.center))
-            y = ui.numbered_steps(surf, right_x, CONTENT_Y, width, [
-                ('Scan the code with your phone', 'Or open the link below on any phone or computer.'),
-                ('Sign in to Tailscale', 'Use the same account as on your gaming PC. If you don\'t have one, '
-                                         'you can create one for free.'),
-                ('This screen updates by itself', 'when the Pi is signed in.')])
-            draw_wrapped(surf, self.url or '', (right_x + 84, y + 10), width - 84, 28, FAINT)
+        right_x = MARGIN + 680
+        ui.fit(surf, (right_x, CONTENT_Y, W - MARGIN - right_x, FOOTER_Y - 50 - CONTENT_Y), BG, self.draw_column)
+
+    def draw_column(self, surf, rect):
+        """The text on the right."""
+        x, y, width = rect.x, rect.y, rect.width
+        if self.state in ('error', 'done', 'starting'):
+            head, body, color = {
+                'error': ("Couldn't connect to Tailscale", self.error, BAD),
+                'done': ('Tailscale is connected', 'You can stream from away from home now.', DIM),
+                'starting': ('Connecting to Tailscale…', 'If the Pi needs signing in, a code to scan appears here.',
+                             DIM)}[self.state]
+            y = draw_text(surf, head, (x, y), 44, TEXT, bold=True, max_width=width).bottom + 26
+            draw_wrapped(surf, body, (x, y), width, 32, color)
+            return
+        y = ui.numbered_steps(surf, x, y, width, [
+            ('Scan the code with your phone', 'Or open the link below on any phone or computer.'),
+            ('Sign in to Tailscale', 'Use the same account as on your gaming PC. If you don\'t have one, '
+                                     'you can create one for free.'),
+            ('This screen updates by itself', 'when the Pi is signed in.')])
+        draw_wrapped(surf, self.url or '', (x + 84, y + 10), width - 84, 28, FAINT)
 
 
 # ---------------------------------------------------------------------------
@@ -707,7 +712,7 @@ class ProgressScreen(Screen):
         box = pygame.Rect(x, y, W - 2 * MARGIN, FOOTER_Y - 50 - y)
         rrect(surf, PANEL, box, 18)
         yy = box.y + 22
-        for line in self.lines:
+        for line in list(self.lines)[-max(0, (box.height - 22) // 40):]:     # the newest lines that fit
             draw_text(surf, line, (box.x + 28, yy), 26, FAINT, max_width=box.width - 56)
             yy += 40
 
@@ -1015,20 +1020,23 @@ class UninstalledScreen(Screen):
         return []
 
     def draw(self, surf):
-        left = pygame.Rect(MARGIN, CONTENT_Y, 600, 600)
+        ui.tick_mark(surf, pygame.Rect(MARGIN, CONTENT_Y, 600, 600).center)
         right_x = MARGIN + 680
-        width = W - MARGIN - right_x
-        ui.tick_mark(surf, left.center)
-        y = draw_text(surf, 'This setup has been removed', (right_x, CONTENT_Y), 44, TEXT, bold=True).bottom + 30
+        ui.fit(surf, (right_x, CONTENT_Y, W - MARGIN - right_x, FOOTER_Y - 50 - CONTENT_Y), BG, self.draw_column)
+
+    def draw_column(self, surf, rect):
+        """The text on the right."""
+        x, width = rect.x, rect.width
+        y = draw_text(surf, 'This setup has been removed', (x, rect.y), 44, TEXT, bold=True,
+                      max_width=width).bottom + 30
         n = self.seconds_left()
         when = 'The Pi restarts in %s' % settings.plural(n, 'second') if n else 'Restarting…'
         y = draw_wrapped(surf, when + ', the way it started before the setup: on Raspberry Pi OS Lite, a text login '
-                         'prompt.', (right_x, y), width, 32, TEXT, line_gap=8) + 24
+                         'prompt.', (x, y), width, 32, TEXT, line_gap=8) + 24
         y = draw_wrapped(surf, 'To set it up again, connect to the Pi over SSH and run the install command from '
-                         '%s.' % REPO, (right_x, y), width, 30, DIM, line_gap=6) + 24
+                         '%s.' % REPO, (x, y), width, 30, DIM, line_gap=6) + 24
         if time.monotonic() - self.restart_at > 45:
-            draw_wrapped(surf, "If the Pi hasn't restarted, unplug it and plug it back in.", (right_x, y), width, 30,
-                         WARN)
+            draw_wrapped(surf, "If the Pi hasn't restarted, unplug it and plug it back in.", (x, y), width, 30, WARN)
 
 
 # ---------------------------------------------------------------------------

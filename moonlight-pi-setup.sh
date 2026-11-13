@@ -49,7 +49,8 @@ LIB_DIR="/usr/local/lib/moonlight-pi-setup"
 MENU_DIR="${LIB_DIR}/menu"
 MENU_BIN="/usr/local/bin/moonlight-menu"
 MENU_FILES=(moonlight_menu.py ui.py network.py bluetooth.py wifi_setup.py settings.py settings_screens.py
-            usb_sharing.py usb_combo.py usb_screens.py moonlight-settings.sh)
+            usb_sharing.py usb_combo.py usb_screens.py xbox_copy.py xbox_screens.py
+            moonlight-settings.sh)
 MENU_PACKAGES=(python3-pygame python3-dbus python3-gi python3-qrcode nftables)
 SETTINGS_HELPER="${LIB_DIR}/moonlight-settings"
 SUDOERS_FILE="/etc/sudoers.d/moonlight-pi-setup"
@@ -60,6 +61,7 @@ POLKIT_RULE="/etc/polkit-1/rules.d/50-moonlight-pi-setup.rules"
 QUIT_HELPER="/usr/local/bin/moonlight-quit-all"
 QUIT_SERVICE="/etc/systemd/system/moonlight-quit-on-shutdown.service"
 USB_SERVICE="/etc/systemd/system/moonlight-usb-sharing.service"
+XBOX_SERVICE="/etc/systemd/system/moonlight-xbox-copy.service"
 
 MARK_BEGIN="# >>> moonlight-pi-setup >>>"
 MARK_END="# <<< moonlight-pi-setup <<<"
@@ -83,6 +85,7 @@ OPT_QUIET_BOOT=1
 OPT_QUIT_ON_SHUTDOWN=1
 OPT_WIFI_POWERSAVE_OFF=1
 OPT_USB_SHARING=1
+OPT_XBOX_COPY=1
 OPT_USB_TAILSCALE=0    # USB sharing over Tailscale: not recommended
 
 # ---------------------------------------------------------------------------
@@ -479,6 +482,7 @@ load_settings() {
       wifi_powersave) OPT_WIFI_POWERSAVE_OFF=$(( value == 1 ? 0 : 1 )) ;;
       usb_sharing) OPT_USB_SHARING=$value ;;
       usb_tailscale) OPT_USB_TAILSCALE=$value ;;
+      xbox_copy) if [[ $value =~ ^[01]$ ]]; then OPT_XBOX_COPY=$value; fi ;;
     esac
   done < <(as_user bash "${MENU_SRC}/moonlight-settings.sh" status 2>/dev/null || true)
   return 0
@@ -493,6 +497,8 @@ show_summary() {
   info "Tailscale:        $(tailscale_installed && echo "already installed" || echo "install (sign in later on the TV), to stream away from home")"
   info "USB sharing:      send USB devices plugged into the Pi, like a wired controller, to your PC"
   info "                  while you stream (USB/IP; the PC is set up with the PC setup script)"
+  info "Sign-in screens:  PlayStation and other controllers also show up on the PC as an Xbox"
+  info "                  controller on Windows' lock, sign-in and UAC screens (with the PC setup)"
   echo
   if (( FIRST_INSTALL )); then
     info "Settings (recommended for now; after the restart, Quick setup on the TV asks about them):"
@@ -508,6 +514,7 @@ show_summary() {
     usb="on, $( (( OPT_USB_TAILSCALE )) && echo "also over Tailscale" || echo "at home only (not over Tailscale)")"
   fi
   info "  USB sharing:        ${usb}"
+  info "  Sign-in screens:    $( (( OPT_XBOX_COPY )) && echo "Xbox copies of other controllers" || echo off)"
   if (( FIRST_INSTALL )) && has_wifi && ! grep -q 'cfg80211.ieee80211_regdom=[A-Z]' /boot/firmware/cmdline.txt 2> /dev/null; then
     info "  Wi-Fi country:      not set yet (Quick setup asks for it; Wi-Fi stays off until then)"
   fi
@@ -864,6 +871,20 @@ setup_usb_sharing() {
   fi
 }
 
+# Xbox copies: while the PC shows its lock screen, sign-in screen or a UAC
+# prompt, each controller that isn't an Xbox controller also shows up on it as
+# an Xbox controller (Windows only lets those use these screens). The PC's side
+# is a small service the PC setup script installs.
+setup_xbox_copy() {
+  step "Setting up Xbox controllers for the PC's sign-in screens"
+  helper xbox-copy "$(on_off "$OPT_XBOX_COPY")"
+  if (( OPT_XBOX_COPY )); then
+    info "Once the PC setup has run on your PC, PlayStation and other controllers work on"
+    info "Windows' lock screen, sign-in screen and UAC prompts while you stream (as an Xbox"
+    info "controller). Switch it off on the TV: Controllers > Sign-in screens."
+  fi
+}
+
 # Keep a copy of this script so --uninstall works even if it was run with curl | bash.
 save_script_copy() {
   local src="${BASH_SOURCE[0]:-}" tmp=""
@@ -919,7 +940,8 @@ finish_install() {
   info "Then set up the PC to match: open PowerShell on the gaming PC and paste:"
   info "  irm ${PC_SCRIPT_URL} | iex"
   info "It lets the PC receive USB devices plugged into the Pi while you stream (it installs"
-  info "usbip-win2 and finds this Pi), and can install Tailscale."
+  info "usbip-win2 and finds this Pi), lets every controller use Windows' sign-in and UAC"
+  info "screens, and can install Tailscale."
   info "USB sharing: choose which devices and ports go to the PC on the TV, in"
   info "Settings > USB sharing. Controllers and headsets go by themselves."
   info "Tailscale: sign the Pi in on the TV (Settings > Tailscale). Moonlight then finds"
@@ -1048,6 +1070,10 @@ do_uninstall() {
     # Gives any shared devices back to the Pi.
     if [[ -f $USB_SERVICE ]]; then
       helper usb-sharing off
+    fi
+    # Removes any Xbox copies.
+    if [[ -f $XBOX_SERVICE ]]; then
+      helper xbox-copy off
     fi
     # Switches the built-in Bluetooth back on, if a USB adapter was chosen.
     if [[ -f ${ROOT_STATE_DIR}/bluetooth.conf ]]; then
@@ -1181,6 +1207,7 @@ main() {
   setup_quit_on_shutdown
   install_tailscale
   setup_usb_sharing
+  setup_xbox_copy
   finish_install
 }
 

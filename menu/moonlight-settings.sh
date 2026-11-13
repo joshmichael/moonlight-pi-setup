@@ -22,6 +22,7 @@
 #                                what a device does (KEY: vendor:product, plus /its-own-ID
 #                                if it has one); auto goes by its type
 #   usb-port PORT on|off         send anything plugged into a port (PORT: e.g. 1-1, or 1-1.3 on a hub)
+#   xbox-copy on|off             an Xbox copy of each other controller on the PC's sign-in and UAC screens
 #   bt-adapter ADDRESS KEY       controllers use this USB Bluetooth adapter (its Bluetooth address,
 #                                and its USB vendor:product[/ID]); the built-in one is switched off
 #   bt-adapter builtin           controllers use the Pi's built-in Bluetooth again
@@ -59,6 +60,9 @@ USB_SERVICE="/etc/systemd/system/${USB_SERVICE_NAME}"
 USB_MODULES="/etc/modules-load.d/moonlight-usb-sharing.conf"
 USB_CONFIG="${ROOT_STATE_DIR}/usb-sharing.conf"
 USB_AVAHI_SERVICE="/etc/avahi/services/moonlight-usb-sharing.service"
+XBOX_SERVICE_NAME="moonlight-xbox-copy.service"
+XBOX_SERVICE="/etc/systemd/system/${XBOX_SERVICE_NAME}"
+XBOX_MODULES="/etc/modules-load.d/moonlight-xbox-copy.conf"
 BT_CONFIG="${ROOT_STATE_DIR}/bluetooth.conf"
 BT_UDEV_RULE="/etc/udev/rules.d/90-moonlight-bluetooth-adapter.rules"
 COUNTRIES="/usr/share/zoneinfo/iso3166.tab"
@@ -211,6 +215,14 @@ cmd_status() {
   local latency
   latency=$(kv_get "$USB_CONFIG" latency)
   say "usb_latency=${latency:-off}"
+  # On, off, or empty if it was never set (the setup then switches it on).
+  local xbox=""
+  if service_enabled "$XBOX_SERVICE_NAME"; then
+    xbox=1
+  elif [[ $(kv_get "$ROOT_STATE" xbox_copy) == 0 ]]; then
+    xbox=0
+  fi
+  say "xbox_copy=${xbox}"
   say "quiet_boot=$(flag grep -qsF "$MARK_BEGIN" "$CONFIG_TXT")"
   say "wifi=$(flag compgen -G '/sys/class/net/*/wireless')"
   say "wifi_powersave=$(flag test ! -f "$NM_WIFI_CONF")"
@@ -582,6 +594,56 @@ cmd_usb_port() {
 }
 
 # ---------------------------------------------------------------------------
+# xbox-copy
+# ---------------------------------------------------------------------------
+# While the PC being streamed to shows its lock screen, sign-in screen or a UAC
+# prompt, each controller that isn't an Xbox controller gets an Xbox copy on
+# the PC (Windows only lets Xbox controllers use those screens). The PC's agent
+# (installed by the PC setup) says when, over UDP port 3241. The service is
+# xbox_copy.py, in the menu's folder. root_set records the choice, so updating
+# the setup keeps it.
+xbox_copy_on() {
+  [[ -f ${MENU_DIR}/xbox_copy.py ]] || die "The Xbox copy isn't installed. Run the setup script again."
+  # uinput: the copies (virtual controllers). usbmon: reading controllers USB sharing sent to the PC.
+  printf '%s
+' "# Installed by moonlight-pi-setup: Xbox copies on sign-in screens" uinput usbmon > "$XBOX_MODULES"
+  modprobe uinput || die "Couldn't load the uinput driver."
+  modprobe usbmon 2> /dev/null || true
+  cat > "$XBOX_SERVICE" <<EOF
+# Installed by moonlight-pi-setup.
+[Unit]
+Description=An Xbox copy of each controller on the gaming PC's sign-in and UAC screens while streaming
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 ${MENU_DIR}/xbox_copy.py serve
+RuntimeDirectory=moonlight-xbox-copy
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable "$XBOX_SERVICE_NAME" > /dev/null 2>&1
+  systemctl restart "$XBOX_SERVICE_NAME"
+  root_set xbox_copy 1
+  say "Controllers get an Xbox copy on your PC's sign-in and UAC screens"
+}
+
+# Stopping the service removes any copies.
+xbox_copy_off() {
+  if [[ -f $XBOX_SERVICE ]]; then
+    systemctl disable --now "$XBOX_SERVICE_NAME" > /dev/null 2>&1 || true
+    rm -f "$XBOX_SERVICE"
+    systemctl daemon-reload
+  fi
+  rm -f "$XBOX_MODULES"
+  root_set xbox_copy 0
+  say "Controllers don't get an Xbox copy on your PC's sign-in and UAC screens"
+}
+
+# ---------------------------------------------------------------------------
 # bt-adapter
 # ---------------------------------------------------------------------------
 # Controllers use one Bluetooth adapter: the built-in one, or a USB adapter
@@ -900,7 +962,7 @@ main() {
     status) cmd_status ;;
     speakers) cmd_speakers "$value" ;;
     init) require_root; lock; cmd_init "$value" ;;
-    quit-on-shutdown|usb-sharing|usb-tailscale|quiet-boot|wifi-powersave)
+    quit-on-shutdown|usb-sharing|usb-tailscale|xbox-copy|quiet-boot|wifi-powersave)
       require_root
       [[ $value == on || $value == off ]] || die "Use: ${cmd} on|off"
       lock

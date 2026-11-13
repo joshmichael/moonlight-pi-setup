@@ -12,6 +12,8 @@ it would for the controller.
 
 Knows the button layouts of PlayStation controllers (DualSense, DualShock 4)
 and Xbox controllers (360, One and Series, and controllers that work like them).
+The Xbox copies (xbox_copy.py) read controllers on the PC with the same
+reader, and the whole reports of PlayStation and Switch Pro controllers.
 
 Installed by moonlight-pi-setup.
 """
@@ -108,15 +110,145 @@ def pad_type(address):
 
 
 # ---------------------------------------------------------------------------
-# Watching the controllers (usbmon's binary interface; see the kernel's
+# Whole controller states, for the Xbox copies (xbox_copy.py). A state is a
+# tuple (buttons, lt, rt, lx, ly, rx, ry, hat_x, hat_y): buttons are the bits
+# below, named by where the button is (the bottom face button is SOUTH, A on an
+# Xbox controller), triggers go from 0 to 255, sticks from -32768 to 32767 with
+# up and left negative, and the d-pad from -1 to 1 (up and left -1).
+# ---------------------------------------------------------------------------
+SOUTH, EAST, WEST, NORTH, L1, R1, SELECT, START, GUIDE, L3, R3 = (1 << i for i in range(11))
+NEUTRAL = (0, 0, 0, 0, 0, 0, 0, 0, 0)
+# A PlayStation d-pad value (0 = up, clockwise to 7 = up-left, 8 = released) as (x, y).
+HAT = ((0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1))
+
+
+def _stick8(v):
+    return v * 257 - 32768          # 0..255 (128 in the middle) to -32768..32767
+
+
+def _sony_state(face, b1, ps, lx, ly, rx, ry, l2, r2):
+    """face: d-pad (low 4 bits) and Square 0x10, Cross 0x20, Circle 0x40,
+    Triangle 0x80. b1: L1 0x01, R1 0x02, Create/Share 0x10, Options 0x20,
+    L3 0x40, R3 0x80. ps: the PS button's bit."""
+    hat = face & 0x0f
+    hx, hy = HAT[hat] if hat < 8 else (0, 0)
+    buttons = ((SOUTH if face & 0x20 else 0) | (EAST if face & 0x40 else 0) | (WEST if face & 0x10 else 0) |
+               (NORTH if face & 0x80 else 0) | (L1 if b1 & 0x01 else 0) | (R1 if b1 & 0x02 else 0) |
+               (SELECT if b1 & 0x10 else 0) | (START if b1 & 0x20 else 0) | (L3 if b1 & 0x40 else 0) |
+               (R3 if b1 & 0x80 else 0) | (GUIDE if ps else 0))
+    return (buttons, l2, r2, _stick8(lx), _stick8(ly), _stick8(rx), _stick8(ry), hx, hy)
+
+
+def dualsense_state(d):
+    # USB report 0x01: sticks [1..4], L2 [5], R2 [6], d-pad and face [8], [9] as b1, PS [10] 0x01.
+    if len(d) < 11 or d[0] != 0x01:
+        return None
+    return _sony_state(d[8], d[9], d[10] & 0x01, d[1], d[2], d[3], d[4], d[5], d[6])
+
+
+def dualshock4_state(d):
+    # USB report 0x01: sticks [1..4], d-pad and face [5], [6] as b1, PS [7] 0x01, L2 [8], R2 [9].
+    if len(d) < 10 or d[0] != 0x01:
+        return None
+    return _sony_state(d[5], d[6], d[7] & 0x01, d[1], d[2], d[3], d[4], d[8], d[9])
+
+
+def _stick12(v, invert=False):
+    v = (v - 2048) * 24             # the sticks reach about 1400 either side of the middle
+    v = -v if invert else v
+    return max(-32768, min(32767, v))
+
+
+def switch_pro_state(d):
+    # Full report 0x30. [3]: Y 0x01, X 0x02, B 0x04, A 0x08, R 0x40, ZR 0x80. [4]: Minus 0x01,
+    # Plus 0x02, right stick 0x04, left stick 0x08, Home 0x10. [5]: down 0x01, up 0x02,
+    # right 0x04, left 0x08, L 0x40, ZL 0x80. Sticks: 12 bits each, packed in [6..8] and
+    # [9..11], with up larger.
+    if len(d) < 12 or d[0] != 0x30:
+        return None
+    r, s, l = d[3], d[4], d[5]
+    buttons = ((SOUTH if r & 0x04 else 0) | (EAST if r & 0x08 else 0) | (WEST if r & 0x01 else 0) |
+               (NORTH if r & 0x02 else 0) | (L1 if l & 0x40 else 0) | (R1 if r & 0x40 else 0) |
+               (SELECT if s & 0x01 else 0) | (START if s & 0x02 else 0) | (GUIDE if s & 0x10 else 0) |
+               (L3 if s & 0x08 else 0) | (R3 if s & 0x04 else 0))
+    hx = (1 if l & 0x04 else 0) - (1 if l & 0x08 else 0)
+    hy = (1 if l & 0x01 else 0) - (1 if l & 0x02 else 0)
+    return (buttons, 255 if l & 0x80 else 0, 255 if r & 0x80 else 0,
+            _stick12(d[6] | (d[7] & 0x0f) << 8), _stick12(d[7] >> 4 | d[8] << 4, True),
+            _stick12(d[9] | (d[10] & 0x0f) << 8), _stick12(d[10] >> 4 | d[11] << 4, True), hx, hy)
+
+
+# Controllers an Xbox copy can read while they're on the PC: (name, reads a report into a
+# state, or None for other messages).
+STATE_PADS = {
+    'dualsense': ('DualSense', dualsense_state),
+    'dualshock4': ('DualShock 4', dualshock4_state),
+    'switchpro': ('Switch Pro controller', switch_pro_state),
+}
+NINTENDO = {'057e:2009': 'switchpro'}
+
+
+def state_pad_type(model):
+    """Which of STATE_PADS a USB model (vendor:product) is, or None."""
+    return SONY.get(model) or NINTENDO.get(model)
+
+
+# ---------------------------------------------------------------------------
+# Reading controllers' reports (usbmon's binary interface; see the kernel's
 # Documentation/usb/usbmon.rst). A read returns one event: a 48-byte header,
-# then the data it captured.
+# then the data it captured. Used here for the shortcut, and by xbox_copy.py.
 # ---------------------------------------------------------------------------
 HEADER = struct.Struct('<8xBBBBH14xiII')    # type, transfer, endpoint, device, bus, status, length, captured
 HEADER_SIZE = 48
 COMPLETE = ord('C')                         # a transfer that finished (an input report arrived)
 INTERRUPT = 1
 MON_IOCT_RING_SIZE = 0x9204
+
+
+class Usbmon:
+    """Hands the input reports (interrupt-IN transfers) of the USB devices being
+    watched to their callbacks. It reads nothing by itself: call read() when
+    its file is ready (select), or from a thread like Watcher's."""
+
+    def __init__(self):
+        self.fd = None
+        self.buf = bytearray(256 * 1024)        # more than usbmon captures for one event
+
+    def open(self):
+        """Raises OSError if usbmon isn't available (modprobe usbmon)."""
+        if self.fd is None:
+            self.fd = os.open(USBMON, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                import fcntl
+                fcntl.ioctl(self.fd, MON_IOCT_RING_SIZE, 1024 * 1024)   # room for a burst of other traffic
+            except OSError:
+                pass
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def fileno(self):
+        return self.fd
+
+    def read(self, handlers):
+        """Reads every event waiting, and calls handlers[(bus, device number)]
+        with the data of each input report from that device. Raises OSError."""
+        buf = self.buf
+        while True:
+            try:
+                n = os.readv(self.fd, [buf])
+            except BlockingIOError:
+                return
+            if n < HEADER_SIZE:
+                continue
+            kind, transfer, endpoint, device, bus, status, _, captured = HEADER.unpack_from(buf)
+            if kind != COMPLETE or transfer != INTERRUPT or not endpoint & 0x80 or status or not captured:
+                continue
+            handler = handlers.get((bus, device))
+            if handler:
+                handler(bytes(buf[HEADER_SIZE:min(n, HEADER_SIZE + captured)]))
 
 
 class Watcher(threading.Thread):
@@ -134,6 +266,7 @@ class Watcher(threading.Thread):
         self.held = set()       # addresses holding the shortcut now
         self.last = None        # when the shortcut last ended a stream
         self.failed = False
+        self.usbmon = Usbmon()
 
     def watch(self, pads):
         """pads: {(bus, device number): (address, a PADS key)}, or {} to stop watching."""
@@ -146,70 +279,49 @@ class Watcher(threading.Thread):
         self.wake.set()
 
     def run(self):
-        buf = bytearray(256 * 1024)     # more than usbmon captures for one event
-        fd = None
+        mon = self.usbmon
+        handlers, handlers_for = {}, None
         while not self.stop:
             with self.lock:
                 pads = self.pads
             if not pads:
-                if fd is not None:
-                    os.close(fd)
-                    fd = None
+                if mon.fd is not None:
+                    mon.close()
                     self.held.clear()
                 self.wake.wait(1)
                 self.wake.clear()
                 continue
-            if fd is None:
-                fd = self.open()
-                if fd is None:
-                    self.wake.wait(5)
-                    self.wake.clear()
-                    continue
-            try:
-                if not select.select([fd], [], [], 0.5)[0]:
-                    continue
-                while True:
-                    try:
-                        n = os.readv(fd, [buf])
-                    except BlockingIOError:
-                        break
-                    self.event(buf, n, pads)
-            except OSError as e:
-                self.log("Stopped watching controllers for Moonlight's shortcut: %s" % e)
-                os.close(fd)
-                fd = None
+            if mon.fd is None and not self.open():
                 self.wake.wait(5)
                 self.wake.clear()
-        if fd is not None:
-            os.close(fd)
+                continue
+            if pads is not handlers_for:
+                handlers_for = pads
+                handlers = {k: (lambda data, pad=pad: self.report(pad, data)) for k, pad in pads.items()}
+            try:
+                if select.select([mon.fd], [], [], 0.5)[0]:
+                    mon.read(handlers)
+            except OSError as e:
+                self.log("Stopped watching controllers for Moonlight's shortcut: %s" % e)
+                mon.close()
+                self.wake.wait(5)
+                self.wake.clear()
+        mon.close()
 
     def open(self):
         try:
-            fd = os.open(USBMON, os.O_RDONLY | os.O_NONBLOCK)
+            self.usbmon.open()
         except OSError as e:
             if not self.failed:
                 self.log("Can't watch controllers for Moonlight's shortcut: %s" % e)
                 self.failed = True
-            return None
+            return False
         self.failed = False
-        try:
-            import fcntl
-            fcntl.ioctl(fd, MON_IOCT_RING_SIZE, 1024 * 1024)    # room for a burst of other traffic
-        except OSError:
-            pass
-        return fd
+        return True
 
-    def event(self, buf, n, pads):
-        if n < HEADER_SIZE:
-            return
-        kind, transfer, endpoint, device, bus, status, _, captured = HEADER.unpack_from(buf)
-        if kind != COMPLETE or transfer != INTERRUPT or not endpoint & 0x80 or status or not captured:
-            return
-        pad = pads.get((bus, device))
-        if not pad:
-            return
+    def report(self, pad, data):
         address, reads = pad
-        held = reads(bytes(buf[HEADER_SIZE:min(n, HEADER_SIZE + captured)]))
+        held = reads(data)
         if held is None:
             return
         if not held:

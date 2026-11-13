@@ -31,6 +31,7 @@ import bluetooth  # noqa: E402
 import network  # noqa: E402
 import settings  # noqa: E402
 import ui  # noqa: E402
+import xbox_screens  # noqa: E402
 from settings_screens import ChoiceScreen, CountryScreen, QuickSetup, SettingsScreen  # noqa: E402
 from ui import (W, H, MARGIN, CONTENT_Y, FOOTER_Y, HEADER_Y, BACK, BG, PANEL, ACCENT, TEXT, DIM, FAINT,  # noqa: E402
                 GOOD, WARN, BAD, WHITE, Item, ListScreen, Screen, Dialog, KeyboardScreen, draw_text, draw_wrapped,
@@ -670,16 +671,16 @@ class App:
             if time.monotonic() > until:
                 self.toast = None
             else:
-                w = ui.font(32, True).size(text)[0] + 80
+                w = min(W - 2 * MARGIN, ui.font(32, True).size(text)[0] + 80)
                 box = pygame.Rect((W - w) // 2, FOOTER_Y - 130, w, 70)
                 rrect(c, tcolor, box, 35)
-                draw_text(c, text, box.center, 32, WHITE, bold=True, anchor='center')
+                draw_text(c, text, box.center, 32, WHITE, bold=True, anchor='center', max_width=w - 80)
         if self.dialog:
             self.dialog.draw(c)
         if self.busy:
             ui.shade(c, 185)
             ui.spinner(c, (W // 2, H // 2 - 50), 44, ACCENT, 9)
-            draw_text(c, self.busy, (W // 2, H // 2 + 50), 40, TEXT, anchor='center')
+            draw_text(c, self.busy, (W // 2, H // 2 + 50), 40, TEXT, anchor='center', max_width=W - 2 * MARGIN)
 
     @property
     def animating(self):
@@ -811,7 +812,7 @@ def network_lines(st, short=False):
 def draw_dot_lines(surf, x, y, width, lines, spacing=48):
     """Lines of text, each with a coloured dot. Returns the y below them."""
     for color, line in lines:
-        dot(surf, color, (x + 10, y + 21), 8)
+        dot(surf, color, (x + 10, y + ui.font(32).get_linesize() // 2 + 2), 8)
         draw_text(surf, line, (x + 36, y), 32, TEXT, max_width=width - 36)
         y += spacing
     return y
@@ -875,13 +876,14 @@ class ControllersScreen(ListScreen):
 
     def refresh(self):
         app = self.app
+        signin = Item('Sign-in screens', lambda: app.push(xbox_screens.XboxCopyScreen(app)), key='signin')
         if not app.bt:
-            self.list.set_items([Item("Bluetooth isn't available on this Pi", selectable=False)])
+            self.list.set_items([Item("Bluetooth isn't available on this Pi", selectable=False), signin])
             return
         st = app.bt_state
         missing = bool(st) and st['adapter'] is None
         items = [Item('Pair a new controller', lambda: app.push(PairScreen(app)), key='pair',
-                      disabled=missing, reason="Your USB Bluetooth adapter isn't plugged in.")]
+                      disabled=missing, reason="Your USB Bluetooth adapter isn't plugged in."), signin]
         paired = [d for d in app.bt_devices if d['paired']]
         paired.sort(key=lambda d: (not d['gamepad'], not d['connected'], d['name'].lower()))
         for d in paired:
@@ -1497,58 +1499,62 @@ class PhoneSetupScreen(Screen):
         st = self.status or {}
         state = st.get('state')
         left = pygame.Rect(MARGIN, CONTENT_Y, 640, 640)
-        right_x = MARGIN + 720
-        width = W - MARGIN - right_x
         if self.failed():
-            draw_text(surf, 'Phone setup isn\'t running', (right_x, CONTENT_Y), 44, TEXT, bold=True)
-            draw_wrapped(surf, self.error or st.get('message') or 'Phone setup stopped.', (right_x, CONTENT_Y + 80),
-                         width, 32, BAD)
-            return
-        if state in (None, 'starting'):
+            pass
+        elif state in (None, 'starting', 'connecting'):
             ui.spinner(surf, left.center, 50, ACCENT, 10)
-            draw_text(surf, 'Starting the setup network…', (right_x, CONTENT_Y), 44, TEXT, bold=True)
-            draw_wrapped(surf, 'This takes a few seconds. The Pi first looks for nearby networks, then '
-                         'starts its own.', (right_x, CONTENT_Y + 80), width, 32)
-            return
-        if state == 'connecting':
-            ui.spinner(surf, left.center, 50, ACCENT, 10)
-            draw_text(surf, 'Connecting to %s…' % st.get('ssid', ''), (right_x, CONTENT_Y), 44, TEXT,
-                      bold=True, max_width=width)
-            draw_wrapped(surf, 'Your phone will disconnect from the setup network. That is normal.',
-                         (right_x, CONTENT_Y + 80), width, 32)
-            return
-        if state == 'connected':
+        elif state == 'connected':
             ui.tick_mark(surf, left.center)
-            draw_text(surf, 'Connected to %s' % st.get('ssid', ''), (right_x, CONTENT_Y), 44, TEXT, bold=True,
-                      max_width=width)
-            draw_wrapped(surf, 'You can put your phone away.', (right_x, CONTENT_Y + 80), width, 32)
-            return
-        # ready (or failed and back to ready)
-        ssid, pw, url = st.get('hotspot_ssid', ''), st.get('hotspot_password', ''), st.get('url', '')
-        if self.qr_key != (ssid, pw, url):
-            self.qr_key = (ssid, pw, url)
-            self.qr = ui.qr_surface(ui.wifi_qr_text(ssid, pw), 560)
-            self.url_qr = ui.qr_surface(url, 220) if url else None
-        rrect(surf, WHITE, left, 24)
-        if self.qr:
-            surf.blit(self.qr, self.qr.get_rect(center=left.center))
+        else:       # ready (or failed and back to ready)
+            ssid, pw, url = st.get('hotspot_ssid', ''), st.get('hotspot_password', ''), st.get('url', '')
+            if self.qr_key != (ssid, pw, url):
+                self.qr_key = (ssid, pw, url)
+                self.qr = ui.qr_surface(ui.wifi_qr_text(ssid, pw), 560)
+                self.url_qr = ui.qr_surface(url, 220) if url else None
+            rrect(surf, WHITE, left, 24)
+            if self.qr:
+                surf.blit(self.qr, self.qr.get_rect(center=left.center))
+            else:
+                draw_text(surf, 'Install python3-qrcode for a QR code', left.center, 28, ui.BLACK, anchor='center')
+        right_x = MARGIN + 720
+        ui.fit(surf, (right_x, CONTENT_Y, W - MARGIN - right_x, FOOTER_Y - 50 - CONTENT_Y), BG, self.draw_column)
+
+    def draw_column(self, surf, rect):
+        """The text on the right."""
+        st = self.status or {}
+        state = st.get('state')
+        x, y, width = rect.x, rect.y, rect.width
+        if self.failed():
+            y = draw_text(surf, 'Phone setup isn\'t running', (x, y), 44, TEXT, bold=True).bottom + 26
+            draw_wrapped(surf, self.error or st.get('message') or 'Phone setup stopped.', (x, y), width, 32, BAD)
+        elif state in (None, 'starting'):
+            y = draw_text(surf, 'Starting the setup network…', (x, y), 44, TEXT, bold=True).bottom + 26
+            draw_wrapped(surf, 'This takes a few seconds. The Pi first looks for nearby networks, then '
+                         'starts its own.', (x, y), width, 32)
+        elif state == 'connecting':
+            y = draw_text(surf, 'Connecting to %s…' % st.get('ssid', ''), (x, y), 44, TEXT, bold=True,
+                          max_width=width).bottom + 26
+            draw_wrapped(surf, 'Your phone will disconnect from the setup network. That is normal.', (x, y), width, 32)
+        elif state == 'connected':
+            y = draw_text(surf, 'Connected to %s' % st.get('ssid', ''), (x, y), 44, TEXT, bold=True,
+                          max_width=width).bottom + 26
+            draw_wrapped(surf, 'You can put your phone away.', (x, y), width, 32)
         else:
-            draw_text(surf, 'Install python3-qrcode for a QR code', left.center, 28, ui.BLACK, anchor='center')
-        y = CONTENT_Y
-        if st.get('last_error'):
-            box = pygame.Rect(right_x, y, width, 90)
-            rrect(surf, (90, 36, 36), box, 16)
-            draw_text(surf, "Couldn't connect: %s" % st['last_error'], (box.x + 24, box.centery), 30, TEXT,
-                      anchor='midleft', max_width=box.width - 48)
-            y += 120
-        y = ui.numbered_steps(surf, right_x, y, width, [
-            ('Scan the code with your phone camera', 'It joins the network "%s" (password: %s).' % (ssid, pw)),
-            ('A setup page opens', "If it doesn't, open %s in your phone's browser." % url),
-            ('Choose your Wi-Fi and type its password', 'The Pi connects and this screen updates.')])
-        if self.url_qr and y + 240 < FOOTER_Y - 40:
-            surf.blit(self.url_qr, (right_x + 84, y))
-            draw_wrapped(surf, 'Or scan this to open the setup page.', (right_x + 84 + 250, y + 20),
-                         width - 84 - 250, 28, FAINT)
+            ssid, pw, url = st.get('hotspot_ssid', ''), st.get('hotspot_password', ''), st.get('url', '')
+            if st.get('last_error'):
+                box = pygame.Rect(x, y, width, 90)
+                rrect(surf, (90, 36, 36), box, 16)
+                draw_text(surf, "Couldn't connect: %s" % st['last_error'], (box.x + 24, box.centery), 30, TEXT,
+                          anchor='midleft', max_width=box.width - 48)
+                y += 120
+            y = ui.numbered_steps(surf, x, y, width, [
+                ('Scan the code with your phone camera', 'It joins the network "%s" (password: %s).' % (ssid, pw)),
+                ('A setup page opens', "If it doesn't, open %s in your phone's browser." % url),
+                ('Choose your Wi-Fi and type its password', 'The Pi connects and this screen updates.')])
+            if self.url_qr and y + 240 < rect.bottom:
+                surf.blit(self.url_qr, (x + 84, y))
+                draw_wrapped(surf, 'Or scan this to open the setup page.', (x + 84 + 250, y + 20),
+                             width - 84 - 250, 28, FAINT)
 
 
 class PowerScreen(ListScreen):

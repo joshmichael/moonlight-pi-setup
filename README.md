@@ -155,9 +155,31 @@ Notes:
 
 **Over Tailscale (not recommended, off by default).** USB sharing is blocked on the Tailscale network, so it only works at home. Over the internet it adds input lag and stutter, and controllers work better through Moonlight. Turn it on in **Settings → USB sharing → Use over Tailscale** (available once the Pi is signed in to Tailscale). The PC's helper finds the Pi's Tailscale address by itself.
 
+## Controllers on Windows' sign-in screens
+
+Windows' lock screen, its sign-in screen (after a restart) and UAC prompts ("Do you want to allow this app to make changes?") only work with **Xbox controllers**: you can type your PIN or choose Yes with one, but not with a DualSense, a DualShock 4 or a Switch Pro controller, whether it goes through Moonlight or USB sharing.
+
+So while your PC shows one of those screens during a stream, every controller connected to the Pi that isn't an Xbox controller also shows up on the PC as an **Xbox controller that copies it** (an "Xbox copy"). When the screen goes away, so do the copies. Your controller itself is never changed or disconnected, so a game keeps seeing it as it is (a DualSense on USB keeps its haptics and adaptive triggers).
+
+- **Buttons go by position**: the bottom face button is the Xbox A (Cross on a PlayStation controller, B on a Switch controller), the right one is B, and so on.
+- It works with Bluetooth controllers, controllers plugged into the Pi, and controllers USB sharing sends to the PC: a DualSense or DualShock 4 there keeps its copy (the Pi reads its button presses as they pass through). A controller that goes to the PC while a screen is up (when you sign in, say) keeps its copy until the screen goes away.
+- It needs the PC set up (the [PC setup script](#setting-up-the-gaming-pc) asks about it): it installs a small Windows service, *Moonlight Pi secure screens*, that tells the Pi when one of those screens is up. It runs from when Windows starts, before anyone signs in.
+- On the TV: **Controllers → Sign-in screens** switches it on or off (it's on by default), shows whether your PC has checked in, and what each connected controller gets.
+
+How it works: the PC's service sends a few bytes to the Pi over UDP port **3241**: at once when a screen comes up or goes away, every second while one is up, and every 5 seconds otherwise. It sends them to the Pis it knows, and as a broadcast on the home network, which also finds a Pi whose address changed. The Pi only acts on them from the PC it's streaming to, and only during a stream; if they stop, the copies go after 3 seconds. Nothing is read from the controllers while no screen is up, so it costs nothing during games. Windows Firewall isn't changed.
+
+Limitations:
+
+- A **Switch Pro controller sent to the PC** only gets a copy while something on the PC (like Steam) has started it, and other USB controllers sent to the PC (apart from PlayStation ones) don't get one: set them to **Never** in Settings → USB sharing → Devices, so they stay on the Pi and get a copy through Moonlight. The menu says which controllers this applies to.
+- Up to 4 copies at once.
+- If no controller works on the lock screen any more, not even an Xbox one (for example after switching user on it), restart the PC.
+- Windows only.
+
+What it's doing: on the Pi, `journalctl -u moonlight-xbox-copy --no-pager` (and `/usr/local/lib/moonlight-pi-setup/menu/xbox_copy.py controllers`, or `sudo ... capture` to watch what a copy reads); on the PC, `%ProgramData%\moonlight-pi-setup\secure-screen.log`.
+
 ## Setting up the gaming PC
 
-If you want USB sharing or Tailscale, run this in **PowerShell** on your Windows PC, as your normal user:
+If you want USB sharing, controllers on sign-in screens or Tailscale, run this in **PowerShell** on your Windows PC, as your normal user:
 
 ```powershell
 irm https://raw.githubusercontent.com/joshmichael/moonlight-pi-setup/main/windows/moonlight-pc-setup.ps1 | iex
@@ -171,7 +193,9 @@ It asks whether to share USB devices plugged into the Pi with this PC. If you sa
 4. Installs a small helper that starts hidden when you log in. It only connects out to the Pi, so Windows Firewall isn't changed.
 5. Offers to restart, which Windows needs to finish installing the driver.
 
-It also offers to install Tailscale. Run it again to check and repair everything (for example after the Pi gets a new address), or to remove USB sharing from the PC.
+Then it asks whether every controller should work on Windows' sign-in screens and UAC prompts (see [above](#controllers-on-windows-sign-in-screens)). If you say yes, it compiles the *Moonlight Pi secure screens* service from its source (`windows/moonlight-secure-screen.cs`) with the C# compiler that comes with Windows, installs it in `%ProgramFiles%\moonlight-pi-setup`, and starts it. Windows asks for permission once. Its settings and log are in `%ProgramData%\moonlight-pi-setup`, which only administrators can change, as the service runs as SYSTEM.
+
+It also offers to install Tailscale. Run it again to check and repair everything (for example after the Pi gets a new address), or to remove USB sharing or the sign-in screens service from the PC.
 
 ## What the script changes
 
@@ -186,7 +210,7 @@ It also offers to install Tailscale. Run it again to check and repair everything
 | Installs the TV menu in `/usr/local/lib/moonlight-pi-setup`, with `moonlight-menu`, the `moonlight-wifi-setup` service and a polkit rule | The menu, and permission for it to change Wi-Fi, restart and run phone setup |
 | Installs the settings helper, `/usr/local/lib/moonlight-pi-setup/moonlight-settings`, with a sudoers rule | The script and the menu change settings through this one root-owned helper, which only accepts its own commands. It keeps its records in `/var/lib/moonlight-pi-setup` |
 | Installs Tailscale, and `usbip` (the Linux USB/IP tools) with `apt` | Tailscale does nothing until you sign in. USB sharing does nothing until a PC is set up for it |
-| By default, and changeable in Settings: quiet-boot options in `/boot/firmware/cmdline.txt` and `config.txt`, the `moonlight-quit-on-shutdown` service, Wi-Fi power saving off (`/etc/NetworkManager/conf.d/90-moonlight-pi-setup-wifi.conf`), and the `moonlight-usb-sharing` service (with `/etc/modules-load.d/moonlight-usb-sharing.conf` and its own `moonlight_usb` firewall table) | See above. Changing the setting undoes it |
+| By default, and changeable in Settings: quiet-boot options in `/boot/firmware/cmdline.txt` and `config.txt`, the `moonlight-quit-on-shutdown` service, Wi-Fi power saving off (`/etc/NetworkManager/conf.d/90-moonlight-pi-setup-wifi.conf`), the `moonlight-usb-sharing` service (with `/etc/modules-load.d/moonlight-usb-sharing.conf` and its own `moonlight_usb` firewall table), and the `moonlight-xbox-copy` service (with `/etc/modules-load.d/moonlight-xbox-copy.conf`) | See above. Changing the setting undoes it |
 | Only if you choose a USB Bluetooth adapter (Controllers → Bluetooth adapter): the built-in Bluetooth switched off with rfkill, and `/etc/udev/rules.d/90-moonlight-bluetooth-adapter.rules` | Switches the chosen adapter on whenever it's plugged in. Choosing Built-in Bluetooth again, or uninstalling, undoes it |
 
 Everything the script adds to a file is marked, and changed files are backed up first.
@@ -208,6 +232,8 @@ The speakers setting fixes both. **7.1 is experimental**: it uses the same metho
 - TV menu: `/tmp/moonlight-menu.log`
 - Setup script runs: `~/.local/share/moonlight-pi-setup/`
 - Phone Wi-Fi setup: `journalctl -u moonlight-wifi-setup --no-pager`
+- USB sharing: `journalctl -u moonlight-usb-sharing --no-pager`
+- Controllers on sign-in screens: `journalctl -u moonlight-xbox-copy --no-pager`
 
 If the menu can't start, the Pi falls back to a "press any key for a command line" prompt, then starts Moonlight.
 
@@ -244,7 +270,7 @@ Or over SSH:
 ~/.local/share/moonlight-pi-setup/moonlight-pi-setup.sh --uninstall
 ```
 
-This removes what the script added (see [What the script changes](#what-the-script-changes)). It puts back how the Pi booted before, your original `~/.asoundrc` and boot options, and removes the menu, the settings helper, the services and USB sharing (including `usbip`). Over SSH, it asks before removing Moonlight or Tailscale. On the PC, run the [PC setup script](#setting-up-the-gaming-pc) again and choose to remove USB sharing. Your user stays in the video, render, input and audio groups, and backups stay in `~/.local/share/moonlight-pi-setup/backups`.
+This removes what the script added (see [What the script changes](#what-the-script-changes)). It puts back how the Pi booted before, your original `~/.asoundrc` and boot options, and removes the menu, the settings helper, the services and USB sharing (including `usbip`). Over SSH, it asks before removing Moonlight or Tailscale. On the PC, run the [PC setup script](#setting-up-the-gaming-pc) again and choose to remove USB sharing and the sign-in screens service. Your user stays in the video, render, input and audio groups, and backups stay in `~/.local/share/moonlight-pi-setup/backups`.
 
 ## Known limitations
 
@@ -254,6 +280,7 @@ This removes what the script added (see [What the script changes](#what-the-scri
 - **PyroWave** (from Nonary's Moonlight fork) decodes too slowly on the Pi 5 for 60 fps.
 - **Enterprise Wi-Fi** (a username as well as a password) can't be set up from the menu.
 - **USB sharing** needs a Windows PC, and some USB devices don't work with usbip-win2 (see [above](#sharing-usb-devices-with-your-pc)).
+- **Controllers on sign-in screens** needs a Windows PC, and a Switch Pro or other non-PlayStation controller sent to the PC by USB sharing only gets a copy if it stays on the Pi (see [above](#controllers-on-windows-sign-in-screens)).
 
 ## Reporting problems
 

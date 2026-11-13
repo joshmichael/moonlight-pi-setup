@@ -33,9 +33,11 @@ FONT_REGULAR = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
 FONT_BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 
 _fonts = {}
+_scale = 1.0        # text sizes are multiplied by this while fit() makes something fit
 
 
 def font(size, bold=False):
+    size = max(10, round(size * _scale))
     key = (size, bold)
     if key not in _fonts:
         try:
@@ -54,17 +56,27 @@ def ellipsize(f, s, max_w):
 
 
 def wrap(f, s, max_w):
+    """Word-wrapped lines. A word too long for a line (like a web address) is
+    broken, after a '/' where possible."""
     lines = []
     for para in s.split('\n'):
-        words = para.split(' ')
         line = ''
-        for w in words:
+        for w in para.split(' '):
             trial = (line + ' ' + w).strip()
             if f.size(trial)[0] <= max_w or not line:
                 line = trial
             else:
                 lines.append(line)
                 line = w
+            while len(line) > 1 and f.size(line)[0] > max_w:
+                cut = len(line) - 1
+                while cut > 1 and f.size(line[:cut])[0] > max_w:
+                    cut -= 1
+                slash = line.rfind('/', 0, cut)
+                if slash > cut // 2:
+                    cut = slash + 1
+                lines.append(line[:cut])
+                line = line[cut:]
         lines.append(line)
     return lines
 
@@ -74,7 +86,7 @@ _rendered = {}
 
 def render(s, size, color, bold=False):
     """Rendered text, cached: the screen is redrawn often and most text doesn't change."""
-    key = (s, size, color, bold)
+    key = (s, size, _scale, color, bold)
     img = _rendered.get(key)
     if img is None:
         if len(_rendered) > 2000:
@@ -100,6 +112,34 @@ def draw_wrapped(surf, s, pos, width, size=32, color=DIM, bold=False, line_gap=8
         surf.blit(render(line, size, color, bold), (x, y))
         y += f.get_linesize() + line_gap
     return y
+
+
+FIT_SCALES = (1.0, 0.9, 0.8, 0.72, 0.65)
+_sheets = {}
+
+
+def fit(surf, rect, bg, draw, inset=0):
+    """Calls draw(target, inner) so that what it draws stays inside rect (on a
+    background of colour bg): if it runs past rect's bottom, it's drawn again
+    with smaller text, until it fits. inner is rect less inset on each side,
+    and target a sheet the drawing goes on first."""
+    global _scale
+    rect = pygame.Rect(rect)
+    sheet = _sheets.get((rect.size, bg))
+    if sheet is None:
+        sheet = _sheets[(rect.size, bg)] = pygame.Surface((rect.width, rect.height * 2))
+        sheet.set_colorkey(bg)          # what's left in bg isn't drawn, and isn't counted as content
+    inner = pygame.Rect(inset, inset, rect.width - 2 * inset, rect.height - 2 * inset)
+    for scale in FIT_SCALES:
+        sheet.fill(bg)
+        _scale = scale
+        try:
+            draw(sheet, inner)
+        finally:
+            _scale = 1.0
+        if sheet.get_bounding_rect().bottom <= rect.height:
+            break
+    surf.blit(sheet, rect.topleft, (0, 0, rect.width, rect.height))
 
 
 def rrect(surf, color, rect, radius=18, width=0):
@@ -612,7 +652,7 @@ class ListScreen(Screen):
     def draw(self, surf):
         self.list.draw(surf)
         rrect(surf, PANEL, pygame.Rect(self.panel_rect), 22)
-        self.draw_panel(surf, pygame.Rect(self.panel_rect).inflate(-64, -64))
+        fit(surf, self.panel_rect, PANEL, self.draw_panel, inset=32)
 
     def draw_panel(self, surf, rect):
         pass
@@ -656,15 +696,27 @@ class Dialog:
     def draw(self, surf):
         shade(surf, 170)
         box = pygame.Rect(0, 0, 1100, 0)
-        lines = wrap(font(34), self.message, box.width - 128)
-        box.height = 220 + len(lines) * 46 + 110
+        # A long message gets smaller text, and is cut short if it still doesn't fit.
+        room = H - 80 - 330
+        for size in (34, 30, 26, 22):
+            step = font(size).get_linesize() + 6
+            lines = wrap(font(size), self.message, box.width - 128)
+            if len(lines) * step <= room:
+                break
+        if len(lines) * step > room:
+            lines = lines[:room // step]
+            last = lines[-1]
+            while last and font(size).size(last + '…')[0] > box.width - 128:
+                last = last[:-1]
+            lines[-1] = last + '…'
+        box.height = 220 + len(lines) * step + 110
         box.center = (W // 2, H // 2)
         rrect(surf, PANEL, box, 26)
-        draw_text(surf, self.title, (box.x + 64, box.y + 56), 46, TEXT, bold=True)
+        draw_text(surf, self.title, (box.x + 64, box.y + 56), 46, TEXT, bold=True, max_width=box.width - 128)
         y = box.y + 140
         for line in lines:
-            draw_text(surf, line, (box.x + 64, y), 34, DIM)
-            y += 46
+            draw_text(surf, line, (box.x + 64, y), size, DIM)
+            y += step
         self.rects = []
         gap = 28
         f = font(34, True)
@@ -942,7 +994,7 @@ class KeyboardScreen(Screen):
 
     # -- drawing -------------------------------------------------------------
     def draw(self, surf):
-        draw_text(surf, self.prompt, (MARGIN, CONTENT_Y), 36, DIM)
+        draw_text(surf, self.prompt, (MARGIN, CONTENT_Y), 36, DIM, max_width=W - 2 * MARGIN)
         field = pygame.Rect(MARGIN, CONTENT_Y + 64, W - 2 * MARGIN, 110)
         rrect(surf, PANEL, field, 18)
         shown = self.text if self.show else '•' * len(self.text)
@@ -960,7 +1012,7 @@ class KeyboardScreen(Screen):
             cx = x0 + f.size(shown[start:self.pos])[0] + 1
             pygame.draw.line(surf, TEXT, (cx, cy - 26), (cx, cy + 26), 3)
         if self.error:
-            draw_text(surf, self.error, (MARGIN, field.bottom + 24), 32, BAD)
+            draw_text(surf, self.error, (MARGIN, field.bottom + 24), 32, BAD, max_width=W - 2 * MARGIN)
         else:
             draw_text(surf, '%d character%s' % (len(self.text), '' if len(self.text) == 1 else 's'), (MARGIN, field.bottom + 24), 28, FAINT)
         upper = self._upper()

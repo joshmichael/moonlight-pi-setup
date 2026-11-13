@@ -191,7 +191,7 @@ class UsbSharingScreen(SnapshotMixin, SettingsListScreen):
         pygame.draw.line(surf, PANEL_HI, (rect.x, y), (rect.right, y), 2)
         y += 22
         for color, text in self.lines:
-            dot(surf, color, (rect.x + 10, y + 19), 8)
+            dot(surf, color, (rect.x + 10, y + ui.font(28).get_linesize() // 2 + 2), 8)
             y = draw_wrapped(surf, text, (rect.x + 32, y), rect.width - 32, 28, TEXT, line_gap=4) + 12
         addr = pi_address(self.app)
         if addr and self.sharing_on():
@@ -493,28 +493,9 @@ class UsbPortsScreen(SnapshotMixin, ListScreen):
 # ---------------------------------------------------------------------------
 # Set up your PC
 # ---------------------------------------------------------------------------
-def wrap_anywhere(text, size, width):
-    """Word-wrapped lines, also breaking words too long for a line (like a web
-    address), after a '/' where possible."""
-    f = ui.font(size)
-    lines = []
-    for line in ui.wrap(f, text, width):
-        while f.size(line)[0] > width:
-            cut = len(line)
-            while cut > 1 and f.size(line[:cut])[0] > width:
-                cut -= 1
-            slash = line.rfind('/', 0, cut)
-            if slash > cut // 2:
-                cut = slash + 1
-            lines.append(line[:cut])
-            line = line[cut:]
-        lines.append(line)
-    return lines
-
-
 def draw_pc_command(surf, x, y, width, app):
     """The PC setup command and this Pi's address. Returns the y below them."""
-    lines = wrap_anywhere(settings.PC_SETUP_COMMAND, 26, width - 48)
+    lines = ui.wrap(ui.font(26), settings.PC_SETUP_COMMAND, width - 48)
     box_h = 20 + len(lines) * 36 + 16
     rrect(surf, PANEL_HI, pygame.Rect(x, y, width, box_h), 14)
     for i, line in enumerate(lines):
@@ -528,10 +509,13 @@ def draw_pc_command(surf, x, y, width, app):
 
 class PcSetupScreen(Screen):
     title = 'Set up your PC'
+    LAST_STEP = ('Answer Yes to sharing USB devices', 'It installs usbip-win2 (Windows asks for permission once) and '
+                                                      'finds this Pi by itself. Restart the PC when it asks.')
 
-    def __init__(self, app):
+    def __init__(self, app, last_step=None):
         super().__init__(app)
         self.qr = ui.qr_surface(settings.PC_SETUP_URL, 420)
+        self.last_step = last_step or self.LAST_STEP
 
     def handle(self, action):
         if action in ui.BACK or action in ('select', 'enter'):
@@ -542,17 +526,18 @@ class PcSetupScreen(Screen):
 
     def draw(self, surf):
         left = pygame.Rect(MARGIN, CONTENT_Y, 480, 480)
-        right_x = MARGIN + 560
-        width = W - MARGIN - right_x
         rrect(surf, ui.WHITE, left, 24)
         if self.qr:
             surf.blit(self.qr, self.qr.get_rect(center=left.center))
         draw_wrapped(surf, 'Scan for the instructions', (left.x, left.bottom + 20), left.width, 28, DIM)
-        y = ui.numbered_steps(surf, right_x, CONTENT_Y, width, [
+        right_x = MARGIN + 560
+        ui.fit(surf, (right_x, CONTENT_Y, W - MARGIN - right_x, ui.FOOTER_Y - 50 - CONTENT_Y), ui.BG, self.draw_column)
+
+    def draw_column(self, surf, rect):
+        """The steps on the right."""
+        y = ui.numbered_steps(surf, rect.x, rect.y, rect.width, [
             ('On your gaming PC, open PowerShell', 'Search for PowerShell in the Start menu. Your normal account is '
                                                    'fine.'),
             ('Paste this command and press Enter', '')])
-        y = draw_pc_command(surf, right_x + 84, y - 56, width - 84, self.app) + 20
-        ui.numbered_steps(surf, right_x, y, width, [
-            ('Answer Yes to sharing USB devices', 'It installs usbip-win2 (Windows asks for permission once) and '
-                                                  'finds this Pi by itself. Restart the PC when it asks.')], first=3)
+        y = draw_pc_command(surf, rect.x + 84, y - 56, rect.width - 84, self.app) + 20
+        ui.numbered_steps(surf, rect.x, y, rect.width, [self.last_step], first=3)

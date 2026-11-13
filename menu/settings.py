@@ -166,7 +166,7 @@ def status():
 
 
 def change(name, value):
-    """name: quit-on-shutdown, usb-sharing, usb-tailscale, quiet-boot or
+    """name: quit-on-shutdown, usb-sharing, usb-tailscale, xbox-copy, quiet-boot or
     wifi-powersave (value on/off), or wifi-country (value XX)."""
     with _lock:
         return _run([name, value], root=True)
